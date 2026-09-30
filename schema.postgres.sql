@@ -147,6 +147,7 @@ CREATE TABLE IF NOT EXISTS schedule_entries (
     room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
     day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
     slot_id BIGINT NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,
+    end_time_override TEXT,
     status TEXT NOT NULL DEFAULT 'PUBLISHED' CHECK (status IN ('PUBLISHED', 'CANCELLED')),
     UNIQUE (run_id, offering_id, meeting_no)
 );

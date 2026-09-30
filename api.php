@@ -1,6 +1,39 @@
 <?php
 declare(strict_types=1);
 
+// Ensure clean output from the start
+ob_start();
+
+// Set up error handling before anything else
+set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    error_log("PHP Error [$errno]: $errstr in $errfile:$errline");
+    // Don't prevent normal execution
+    return false;
+});
+
+set_exception_handler(function($e) {
+    error_log('Uncaught Exception: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+    ob_clean(); // Clear any buffered output
+    header('Content-Type: application/json; charset=utf-8');
+    http_response_code(500);
+    echo json_encode(['ok' => false, 'error' => 'Server error.'], JSON_UNESCAPED_SLASHES) ?: '{"ok":false,"error":"Server error"}';
+    exit;
+});
+
+// Catch fatal errors
+register_shutdown_function(function() {
+    $error = error_get_last();
+    if ($error && ($error['type'] & (E_ERROR | E_PARSE | E_COMPILE_ERROR | E_COMPILE_WARNING))) {
+        error_log('Fatal Error [' . $error['type'] . ']: ' . $error['message'] . ' in ' . $error['file'] . ':' . $error['line']);
+        ob_clean();
+        if (!headers_sent()) {
+            header('Content-Type: application/json; charset=utf-8');
+            http_response_code(500);
+        }
+        echo '{"ok":false,"error":"Server error"}';
+    }
+});
+
 require_once __DIR__ . DIRECTORY_SEPARATOR . 'db.php';
 require_once __DIR__ . DIRECTORY_SEPARATOR . 'security.php';
 require_once __DIR__ . DIRECTORY_SEPARATOR . 'captcha_challenge.php';
@@ -10,8 +43,17 @@ require_once __DIR__ . DIRECTORY_SEPARATOR . 'captcha_challenge.php';
 const DAY_NAMES = [1 => 'Monday', 2 => 'Tuesday', 3 => 'Wednesday', 4 => 'Thursday', 5 => 'Friday'];
 
 if (!defined('EASYSCHED_LIBRARY_MODE')) {
-    easysched_start_session();
-    easysched_send_security_headers();
+    try {
+        easysched_start_session();
+        easysched_send_security_headers();
+    } catch (Throwable $e) {
+        error_log('Session initialization error: ' . $e->getMessage());
+        ob_clean();
+        header('Content-Type: application/json; charset=utf-8');
+        http_response_code(500);
+        echo json_encode(['ok' => false, 'error' => 'Session error'], JSON_UNESCAPED_SLASHES) ?: '{"ok":false,"error":"Session error"}';
+        exit;
+    }
 }
 
 final class ApiError extends RuntimeException
@@ -24,10 +66,35 @@ final class ApiError extends RuntimeException
 
 function respond(array $payload, int $status = 200): never
 {
-    http_response_code($status);
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    exit;
+    // Clean any buffered output
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+    
+    // Set headers
+    if (!headers_sent()) {
+        http_response_code($status);
+        header('Content-Type: application/json; charset=utf-8');
+    }
+    
+    // Encode to JSON
+    $json = null;
+    try {
+        $json = json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e1) {
+        error_log('JSON encode with flags failed: ' . $e1->getMessage());
+        // Try again without throw flag
+        $json = @json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+    
+    // Ensure we have valid output
+    if (!is_string($json) || empty($json)) {
+        $json = '{"ok":false,"error":"Encoding error"}';
+    }
+    
+    // Output
+    echo $json;
+    exit(0);
 }
 
 function body(): array
@@ -270,7 +337,7 @@ function consume_email_otp(PDO $pdo, string $purpose, string $identifier, string
 function request_registration_otp(PDO $pdo, array $input): array
 {
     $email = input_email($input);
-    if ($email === '') throw new ApiError(422, 'Email address is required.');
+        if ($email === '') throw new ApiError(422, 'Email address is required.');
     $stmt = $pdo->prepare('SELECT id FROM users WHERE lower(email) = ? UNION SELECT id FROM pending_registrations WHERE lower(email) = ? AND status = \'PENDING\' LIMIT 1');
     $stmt->execute([$email, $email]);
     if ($stmt->fetchColumn()) throw new ApiError(409, 'That email is already registered or awaiting review.');
@@ -317,9 +384,9 @@ function register_student(PDO $pdo, array $input): array
     $displayName = input_string($input, 'display_name', 160);
     $email = input_email($input);
     if ($email === '') throw new ApiError(422, 'Email address is required.');
-    $enrollmentRef = input_string($input, 'enrollment_ref', 60);
+    $enrollmentRef = '';
     $programId = input_int($input, 'program_id', 1, 100000000);
-    $yearLevel = input_int($input, 'year_level', 1, 8);
+    $yearLevel = input_int($input, 'year_level', 1, 4);
     $sectionId = input_int($input, 'section_id', 1, 100000000, false);
     $password = (string) ($input['password'] ?? '');
     $passwordLength = function_exists('mb_strlen') ? mb_strlen($password) : strlen($password);
@@ -456,6 +523,13 @@ function active_run(PDO $pdo, int $termId): ?array
     return $stmt->fetch() ?: null;
 }
 
+function last_generation(PDO $pdo, int $termId): ?array
+{
+    $stmt = $pdo->prepare('SELECT * FROM schedule_runs WHERE term_id = ? ORDER BY id DESC LIMIT 1');
+    $stmt->execute([$termId]);
+    return $stmt->fetch() ?: null;
+}
+
 function validate_published_schedule(PDO $pdo, int $termId): array
 {
     $run = active_run($pdo, $termId);
@@ -584,8 +658,8 @@ function scoped_schedule(PDO $pdo, array $user, int $termId): array
     }
     $sql = 'SELECT se.id, se.run_id, se.offering_id, se.meeting_no, se.day_of_week, se.slot_id,
                    ts.code AS slot_code, ts.label AS slot_label, ts.start_time,
-                   COALESCE((SELECT end_time FROM time_slots ts_end WHERE ts_end.slot_order = ts.slot_order + s.duration_slots - 1), ts.end_time) AS end_time,
-                   r.id AS room_id, r.code AS room_code, r.name AS room_name, r.capacity AS room_capacity,
+                   COALESCE(se.end_time_override, (SELECT end_time FROM time_slots ts_end WHERE ts_end.slot_order = ts.slot_order + s.duration_slots - 1), ts.end_time) AS end_time,
+                   r.id AS room_id, r.code AS room_code, r.name AS room_name, r.capacity AS room_capacity, r.room_type,
                    s.id AS subject_id, s.code AS subject_code, s.name AS subject_name, s.duration_slots,
                    sec.id AS section_id, sec.code AS section_code, sec.student_count,
                    p.code AS program_code, p.name AS program_name,
@@ -615,7 +689,7 @@ function bootstrap(PDO $pdo, array $user): array
     $termId = active_term_id($pdo);
     $terms = $pdo->query('SELECT id, academic_year, semester, is_active FROM academic_terms ORDER BY academic_year DESC, id DESC')->fetchAll();
     $programs = $pdo->query('SELECT id, code, name, active FROM programs WHERE active = 1 ORDER BY code')->fetchAll();
-    $instructors = $pdo->query('SELECT id, employee_no, name, email, max_hours_day, active FROM instructors WHERE active = 1 ORDER BY name')->fetchAll();
+    $instructors = $pdo->query('SELECT id, employee_no, name, email, max_hours_day, active FROM instructors WHERE active = 1 ORDER BY id')->fetchAll();
     $rooms = decode_rows($pdo->query('SELECT id, code, name, capacity, room_type, features_json, active FROM rooms WHERE active = 1 ORDER BY code')->fetchAll(), ['features_json']);
     foreach ($rooms as &$room) {
         $room['features'] = $room['features_json'];
@@ -629,11 +703,17 @@ function bootstrap(PDO $pdo, array $user): array
     $stmt = $pdo->prepare('SELECT sec.id, sec.program_id, sec.code, sec.year_level, sec.student_count, sec.term_id, p.code AS program_code, p.name AS program_name FROM sections sec JOIN programs p ON p.id = sec.program_id WHERE sec.active = 1 AND sec.term_id = ? ORDER BY sec.code');
     $stmt->execute([$termId]);
     $sections = $stmt->fetchAll();
-    $stmt = $pdo->prepare('SELECT co.id, co.term_id, co.subject_id, co.section_id, co.instructor_id, co.enrollment, co.required_meetings, co.status, s.code AS subject_code, s.name AS subject_name, sec.code AS section_code, i.name AS instructor_name FROM course_offerings co JOIN subjects s ON s.id = co.subject_id JOIN sections sec ON sec.id = co.section_id JOIN instructors i ON i.id = co.instructor_id WHERE co.term_id = ? AND co.status = \'ACTIVE\' ORDER BY sec.code, s.code');
+    $stmt = $pdo->prepare('SELECT co.id, co.term_id, co.subject_id, co.section_id, co.instructor_id, co.enrollment, co.required_meetings, co.status, s.code AS subject_code, s.name AS subject_name, s.room_type, s.required_features_json, sec.code AS section_code, i.name AS instructor_name FROM course_offerings co JOIN subjects s ON s.id = co.subject_id JOIN sections sec ON sec.id = co.section_id JOIN instructors i ON i.id = co.instructor_id WHERE co.term_id = ? AND co.status = \'ACTIVE\' ORDER BY sec.code, s.code');
     $stmt->execute([$termId]);
     $offerings = $stmt->fetchAll();
+    foreach ($offerings as &$offering) {
+        $offering['required_features'] = json_array($offering['required_features_json']);
+        unset($offering['required_features_json']);
+    }
+    unset($offering);
     $slots = $pdo->query('SELECT id, code, label, start_time, end_time, slot_order FROM time_slots ORDER BY slot_order')->fetchAll();
     $run = active_run($pdo, $termId);
+    $schedules = scoped_schedule($pdo, $user, $termId);
     $settings = $pdo->query('SELECT setting_key, setting_value FROM system_settings')->fetchAll(PDO::FETCH_KEY_PAIR);
     $users = [];
     $pendingRegistrations = [];
@@ -642,18 +722,40 @@ function bootstrap(PDO $pdo, array $user): array
         $pendingRegistrations = $pdo->query("SELECT pr.id, pr.username, pr.display_name, pr.email, pr.enrollment_ref, pr.program_id, pr.year_level, pr.section_id, pr.status, pr.review_note, pr.created_at, p.code AS program_code, sec.code AS section_code FROM pending_registrations pr JOIN programs p ON p.id = pr.program_id LEFT JOIN sections sec ON sec.id = pr.section_id WHERE pr.status = 'PENDING' ORDER BY pr.created_at ASC, pr.id ASC")->fetchAll();
     }
     $scheduleRequests = [];
-    if ($user['role'] === 'admin') $scheduleRequests = $pdo->query("SELECT sr.*, s.code AS subject_code, sec.code AS section_code, i.name AS instructor_name, r.code AS room_code, ts.label AS slot_label FROM schedule_requests sr JOIN course_offerings co ON co.id=sr.offering_id JOIN subjects s ON s.id=co.subject_id JOIN sections sec ON sec.id=co.section_id JOIN instructors i ON i.id=sr.instructor_id JOIN rooms r ON r.id=sr.room_id JOIN time_slots ts ON ts.id=sr.slot_id WHERE sr.status='PENDING' ORDER BY sr.created_at ASC")->fetchAll();
-    $schedules = scoped_schedule($pdo, $user, $termId);
+    if (in_array($user['role'], ['admin', 'instructor'], true)) {
+        $requestSql = "SELECT sr.*, s.code AS subject_code, s.name AS subject_name, sec.code AS section_code, i.name AS instructor_name, r.code AS room_code, ts.label AS slot_label, ts.start_time AS request_start_time, COALESCE(sr.requested_end_time, ts.end_time) AS requested_end_time FROM schedule_requests sr JOIN course_offerings co ON co.id=sr.offering_id JOIN subjects s ON s.id=co.subject_id JOIN sections sec ON sec.id=co.section_id JOIN instructors i ON i.id=sr.instructor_id JOIN rooms r ON r.id=sr.room_id JOIN time_slots ts ON ts.id=sr.slot_id WHERE 1=1";
+        $requestParams = [];
+        if ($user['role'] === 'instructor') { $requestSql .= ' AND sr.instructor_id = ?'; $requestParams[] = (int) $user['instructor_id']; }
+        if ($user['role'] === 'admin') $requestSql .= " AND sr.status='PENDING'";
+        $requestSql .= ' ORDER BY sr.created_at ASC';
+        $requestStmt = $pdo->prepare($requestSql); $requestStmt->execute($requestParams); $scheduleRequests = $requestStmt->fetchAll();
+    }
     if (in_array($user['role'], ['instructor', 'student'], true)) {
+        if ($user['role'] === 'student') {
+            $validSectionId = $pdo->prepare('SELECT sec.id FROM sections sec JOIN course_offerings co ON co.section_id = sec.id AND co.term_id = ? AND co.status = "ACTIVE" WHERE sec.id = ? AND sec.active = 1 GROUP BY sec.id LIMIT 1');
+            $validSectionId->execute([$termId, (int) ($user['section_id'] ?? 0)]);
+            if ($validSectionId->fetchColumn() === false) {
+                $fallbackSectionId = $pdo->prepare('SELECT sec.id FROM sections sec JOIN course_offerings co ON co.section_id = sec.id AND co.term_id = ? AND co.status = "ACTIVE" WHERE sec.active = 1 GROUP BY sec.id ORDER BY sec.id LIMIT 1');
+                $fallbackSectionId->execute([$termId]);
+                $fallbackValue = $fallbackSectionId->fetchColumn();
+                if ($fallbackValue !== false) {
+                    $pdo->prepare('UPDATE users SET section_id = ? WHERE id = ? AND role = "student"')->execute([(int) $fallbackValue, (int) $user['id']]);
+                    $user['section_id'] = (int) $fallbackValue;
+                }
+            }
+        }
+
         $offerings = array_values(array_filter($offerings, static function (array $offering) use ($user): bool {
             return $user['role'] === 'instructor'
                 ? (int) $offering['instructor_id'] === (int) $user['instructor_id']
-                : (int) $offering['section_id'] === (int) $user['section_id'];
+                : (int) $offering['section_id'] === (int) ($user['section_id'] ?? 0);
         }));
         $allowedInstructorIds = array_map('intval', array_column($offerings, 'instructor_id'));
         $allowedSectionIds = array_map('intval', array_column($offerings, 'section_id'));
         $allowedSubjectIds = array_map('intval', array_column($offerings, 'subject_id'));
-        $allowedRoomIds = array_map('intval', array_column($schedules, 'room_id'));
+        $allowedRoomIds = $user['role'] === 'instructor'
+            ? array_map('intval', array_column($rooms, 'id'))
+            : array_map('intval', array_column($schedules, 'room_id'));
         $instructors = array_values(array_filter($instructors, static fn(array $row): bool => in_array((int) $row['id'], $allowedInstructorIds, true)));
         $sections = array_values(array_filter($sections, static fn(array $row): bool => in_array((int) $row['id'], $allowedSectionIds, true)));
         $subjects = array_values(array_filter($subjects, static fn(array $row): bool => in_array((int) $row['id'], $allowedSubjectIds, true)));
@@ -680,6 +782,7 @@ function bootstrap(PDO $pdo, array $user): array
         'time_slots' => $slots,
         'days' => DAY_NAMES,
         'active_run' => $run ? ['id' => (int) $run['id'], 'status' => $run['status'], 'created_at' => $run['created_at'], 'assigned_tasks' => (int) $run['assigned_tasks'], 'total_tasks' => (int) $run['total_tasks'], 'diagnostics' => json_decode($run['diagnostics_json'], true) ?: []] : null,
+        'last_generation' => ($lastGeneration = last_generation($pdo, $termId)) ? ['id' => (int) $lastGeneration['id'], 'status' => $lastGeneration['status'], 'created_at' => $lastGeneration['created_at'], 'assigned_tasks' => (int) $lastGeneration['assigned_tasks'], 'total_tasks' => (int) $lastGeneration['total_tasks'], 'diagnostics' => json_decode($lastGeneration['diagnostics_json'], true) ?: []] : null,
         'validation' => validate_published_schedule($pdo, $termId),
         'schedules' => $schedules,
         'database_driver' => (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME),
@@ -711,7 +814,7 @@ function load_offerings(PDO $pdo, int $termId): array
 
 function load_scheduler_context(PDO $pdo): array
 {
-    $slots = $pdo->query('SELECT id, slot_order, start_time, end_time FROM time_slots ORDER BY slot_order')->fetchAll();
+    $slots = $pdo->query('SELECT id, slot_order, start_time, end_time FROM time_slots WHERE slot_order <> 6 ORDER BY slot_order')->fetchAll();
     $rooms = decode_rows($pdo->query('SELECT id, capacity, room_type, features_json FROM rooms WHERE active = 1')->fetchAll(), ['features_json']);
     foreach ($rooms as &$room) {
         $room['features'] = array_map('strtolower', array_map('strval', $room['features_json']));
@@ -755,18 +858,19 @@ function occupancy_key(string $type, int $resourceId, int $day, int $slotId): st
     return $type . ':' . $resourceId . ':' . $day . ':' . $slotId;
 }
 
-function candidate_for(array $task, array $room, int $day, array $window, array $context, array $occupied, array $dailyHours): ?array
+function candidate_for(array $task, array $room, int $day, array $window, array $context, array $occupied, array $dailyHours, bool $requestProposal = false): ?array
 {
-    if ((int) $room['capacity'] < (int) $task['enrollment']) {
+    if (!$requestProposal && (int) $room['capacity'] < (int) $task['enrollment']) {
         return null;
     }
-    if ($room['room_type'] !== $task['room_type']) {
+    if (!$requestProposal && (string) $room['room_type'] !== (string) $task['room_type']) {
         return null;
     }
-    $roomFeatures = array_map('strtolower', $room['features']);
-    foreach ($task['required_features'] as $feature) {
-        if (!in_array(strtolower((string) $feature), $roomFeatures, true)) {
-            return null;
+    if (!$requestProposal) {
+        foreach ($task['required_features'] as $feature) {
+            if (!in_array(strtolower((string) $feature), $room['features'], true)) {
+                return null;
+            }
         }
     }
     $roomHours = 0;
@@ -778,30 +882,24 @@ function candidate_for(array $task, array $room, int $day, array $window, array 
         if (isset($occupied[$keyRoom]) || isset($occupied[$keyInstructor]) || isset($occupied[$keySection])) {
             return null;
         }
-        if (isset($context['blocked_room'][(int) $room['id'] . ':' . $day . ':' . $slotId])) {
-            return null;
-        }
-        if (isset($context['blocked_instructor'][(int) $task['instructor_id'] . ':' . $day . ':' . $slotId])) {
-            return null;
-        }
-        if (isset($context['blocked_section'][(int) $task['section_id'] . ':' . $day . ':' . $slotId])) {
+        if (!$requestProposal && (isset($context['blocked_room'][(int) $room['id'] . ':' . $day . ':' . $slotId])
+            || isset($context['blocked_instructor'][(int) $task['instructor_id'] . ':' . $day . ':' . $slotId])
+            || isset($context['blocked_section'][(int) $task['section_id'] . ':' . $day . ':' . $slotId]))) {
             return null;
         }
         $roomHours += (strtotime($slot['end_time']) - strtotime($slot['start_time'])) / 3600;
     }
     $currentHours = (float) ($dailyHours[(int) $task['instructor_id'] . ':' . $day] ?? 0);
-    if ($currentHours + $roomHours > (int) $task['max_hours_day']) {
+    if (!$requestProposal && $currentHours + $roomHours > (int) $task['max_hours_day']) {
         return null;
     }
-    $startOrder = (int) $window[0]['slot_order'];
-    $earlyLatePenalty = ($startOrder === 1 ? 1.5 : 0) + ($startOrder >= 5 ? 1.5 : 0);
     $preferencePenalty = 0.0;
     foreach ($window as $slot) {
         $preference = (int) ($context['preferences'][(int) $task['instructor_id'] . ':' . $day . ':' . (int) $slot['id']] ?? 0);
         $preferencePenalty += $preference < 0 ? abs($preference) * 1.5 : -$preference * 0.75;
     }
     $roomWaste = max(0, (int) $room['capacity'] - (int) $task['enrollment']);
-    return ['room_id' => (int) $room['id'], 'day' => $day, 'slot_id' => (int) $window[0]['id'], 'slot_ids' => array_map(static fn(array $slot): int => (int) $slot['id'], $window), 'hours' => $roomHours, 'cost' => $roomWaste * 0.01 + $earlyLatePenalty + $preferencePenalty];
+    return ['room_id' => (int) $room['id'], 'day' => $day, 'slot_id' => (int) $window[0]['id'], 'slot_ids' => array_map(static fn(array $slot): int => (int) $slot['id'], $window), 'hours' => $roomHours, 'cost' => $roomWaste * 0.01 + $preferencePenalty];
 }
 
 function build_tasks(array $offerings): array
@@ -828,7 +926,7 @@ function scheduler_preflight(array $offerings, array $context): array
 
     foreach ($offerings as $offering) {
         $eligibleRooms = array_filter($context['rooms'], static function (array $room) use ($offering): bool {
-            if ((int) $room['capacity'] < (int) $offering['enrollment'] || $room['room_type'] !== $offering['room_type']) {
+            if ((int) $room['capacity'] < (int) $offering['enrollment'] || (string) $room['room_type'] !== (string) $offering['room_type']) {
                 return false;
             }
             foreach ($offering['required_features'] as $feature) {
@@ -839,8 +937,7 @@ function scheduler_preflight(array $offerings, array $context): array
             return true;
         });
         if ($eligibleRooms === []) {
-            $featureText = $offering['required_features'] ? ' with ' . implode(', ', $offering['required_features']) : '';
-            $issues[] = sprintf('%s for %s needs a %s room for %d students%s, but no eligible room exists.', $offering['subject_code'], $offering['section_code'], $offering['room_type'], (int) $offering['enrollment'], $featureText);
+            $issues[] = sprintf('%s for %s needs a %s room for %d students with %s, but no eligible room exists.', $offering['subject_code'], $offering['section_code'], strtolower((string) $offering['room_type']), (int) $offering['enrollment'], $offering['required_features'] === [] ? 'no special features' : implode(', ', $offering['required_features']));
         }
         if ((int) $offering['duration_slots'] > count($context['slots'])) {
             $issues[] = sprintf('%s for %s needs %d consecutive slots, but only %d are configured.', $offering['subject_code'], $offering['section_code'], (int) $offering['duration_slots'], count($context['slots']));
@@ -866,17 +963,7 @@ function explain_unscheduled_tasks(array $tasks, array $context): array
         $hasRoom = false;
         $hasTime = false;
         foreach ($context['rooms'] as $room) {
-            if ((int) $room['capacity'] < (int) $task['enrollment'] || $room['room_type'] !== $task['room_type']) {
-                continue;
-            }
-            $featuresMatch = true;
-            foreach ($task['required_features'] as $feature) {
-                if (!in_array(strtolower((string) $feature), $room['features'], true)) {
-                    $featuresMatch = false;
-                    break;
-                }
-            }
-            if (!$featuresMatch) {
+            if ((int) $room['capacity'] < (int) $task['enrollment']) {
                 continue;
             }
             $hasRoom = true;
@@ -891,7 +978,7 @@ function explain_unscheduled_tasks(array $tasks, array $context): array
             }
         }
         if (!$hasRoom) {
-            $reason = sprintf('%s (%s) has no room matching its capacity, type, and required features.', $task['subject_name'], $task['section_code']);
+            $reason = sprintf('%s (%s) has no room matching its capacity and type.', $task['subject_name'], $task['section_code']);
         } elseif (!$hasTime) {
             $reason = sprintf('%s (%s) has no individually valid time because of duration, availability, or daily-hour limits.', $task['subject_name'], $task['section_code']);
         } else {
@@ -902,6 +989,127 @@ function explain_unscheduled_tasks(array $tasks, array $context): array
     return array_values(array_unique($reasons));
 }
 
+function section_schedule_gap_slots(array $sectionAssignments, array $slotPositions): int
+{
+    $gaps = 0;
+    foreach ($sectionAssignments as $dayAssignments) {
+        $intervals = [];
+        foreach ($dayAssignments as $assignment) {
+            $positions = array_map(static fn(int $slotId): int => $slotPositions[$slotId] ?? 0, $assignment['slot_ids']);
+            $intervals[] = [min($positions), max($positions)];
+        }
+        usort($intervals, static fn(array $left, array $right): int => $left[0] <=> $right[0]);
+        $lastEnd = null;
+        foreach ($intervals as [$start, $end]) {
+            if ($lastEnd !== null && $start > $lastEnd + 1) {
+                $gaps += $start - $lastEnd - 1;
+            }
+            $lastEnd = max($lastEnd ?? $end, $end);
+        }
+    }
+    return $gaps;
+}
+
+function section_schedule_compactness_cost(array $sectionAssignments, array $slotPositions): int
+{
+    $daysUsed = 0;
+    $dailyOverload = 0.0;
+    $dailyStartDelay = 0;
+    foreach ($sectionAssignments as $dayAssignments) {
+        if ($dayAssignments === []) {
+            continue;
+        }
+        $daysUsed++;
+        $dailyHours = array_sum(array_map(static fn(array $assignment): float => (float) $assignment['hours'], $dayAssignments));
+        $dailyOverload += max(0.0, $dailyHours - 4.0);
+        $starts = [];
+        foreach ($dayAssignments as $assignment) {
+            foreach ($assignment['slot_ids'] as $slotId) {
+                $starts[] = $slotPositions[(int) $slotId] ?? 1;
+            }
+        }
+        $dailyStartDelay += max(0, min($starts) - 1);
+    }
+    return (int) round(section_schedule_gap_slots($sectionAssignments, $slotPositions) * 100000 + $dailyOverload * 10000 + $dailyStartDelay * 1000 + $daysUsed * 100);
+}
+
+function compact_schedule_assignments(array $assigned, array $candidateOptions, array $slotPositions): array
+{
+    $maxPasses = min(8, count($assigned));
+    for ($pass = 0; $pass < $maxPasses; $pass++) {
+        $changed = false;
+        foreach (array_keys($assigned) as $taskId) {
+            $placement = $assigned[$taskId];
+            $task = $placement['task'];
+            $sectionAssignments = [];
+            foreach ($assigned as $otherTaskId => $otherPlacement) {
+                if ($otherTaskId === $taskId || (int) $otherPlacement['task']['section_id'] !== (int) $task['section_id']) {
+                    continue;
+                }
+                $sectionAssignments[(int) $otherPlacement['candidate']['day']][] = $otherPlacement['candidate'];
+            }
+            $withCurrent = $sectionAssignments;
+            $withCurrent[(int) $placement['candidate']['day']][] = $placement['candidate'];
+            $bestCost = section_schedule_compactness_cost($withCurrent, $slotPositions);
+            $bestCandidate = $placement['candidate'];
+
+            foreach ($candidateOptions[$taskId] as $candidate) {
+                if ((int) $candidate['room_id'] === (int) $placement['candidate']['room_id']
+                    && (int) $candidate['day'] === (int) $placement['candidate']['day']
+                    && (int) $candidate['slot_id'] === (int) $placement['candidate']['slot_id']) {
+                    continue;
+                }
+
+                $proposal = $sectionAssignments;
+                $proposal[(int) $candidate['day']][] = $candidate;
+                $proposalCost = section_schedule_compactness_cost($proposal, $slotPositions);
+                if ($proposalCost >= $bestCost) {
+                    continue;
+                }
+
+                $available = true;
+                $instructorDayHours = 0.0;
+                foreach ($assigned as $otherTaskId => $otherPlacement) {
+                    if ($otherTaskId === $taskId) {
+                        continue;
+                    }
+                    $otherTask = $otherPlacement['task'];
+                    $otherCandidate = $otherPlacement['candidate'];
+                    if ((int) $otherTask['instructor_id'] === (int) $task['instructor_id']
+                        && (int) $otherCandidate['day'] === (int) $candidate['day']) {
+                        $instructorDayHours += (float) $otherCandidate['hours'];
+                    }
+                    if ((int) $otherCandidate['day'] !== (int) $candidate['day']) {
+                        continue;
+                    }
+                    $sharesResource = (int) $otherTask['section_id'] === (int) $task['section_id']
+                        || (int) $otherTask['instructor_id'] === (int) $task['instructor_id']
+                        || (int) $otherCandidate['room_id'] === (int) $candidate['room_id'];
+                    if ($sharesResource && array_intersect($otherCandidate['slot_ids'], $candidate['slot_ids']) !== []) {
+                        $available = false;
+                        break;
+                    }
+                }
+                if (!$available || $instructorDayHours + (float) $candidate['hours'] > (int) $task['max_hours_day']) {
+                    continue;
+                }
+
+                $bestCost = $proposalCost;
+                $bestCandidate = $candidate;
+            }
+
+            if ($bestCandidate !== $placement['candidate']) {
+                $assigned[$taskId]['candidate'] = $bestCandidate;
+                $changed = true;
+            }
+        }
+        if (!$changed) {
+            break;
+        }
+    }
+    return $assigned;
+}
+
 function solve_schedule(array $tasks, array $context, int $nodeLimit = 100000): array
 {
     $occupied = [];
@@ -909,12 +1117,36 @@ function solve_schedule(array $tasks, array $context, int $nodeLimit = 100000): 
     $assigned = [];
     $nodes = 0;
     $failureCounts = [];
+    $deadline = microtime(true) + 20.0;
+    $slotLoads = [];
+    $candidateOptions = [];
+    $slotPositions = [];
+    foreach ($context['slots'] as $slot) {
+        $slotPositions[(int) $slot['id']] = (int) $slot['slot_order'];
+    }
+    foreach ($tasks as $task) {
+        $options = [];
+        foreach ($context['rooms'] as $room) {
+            foreach (DAY_NAMES as $day => $dayName) {
+                foreach ($context['slots'] as $slotIndex => $_slot) {
+                    $window = slot_window($context['slots'], $slotIndex, (int) $task['duration_slots']);
+                    if ($window === null) continue;
+                    $candidate = candidate_for($task, $room, (int) $day, $window, $context, [], []);
+                    if ($candidate !== null) {
+                        $candidate['day_name'] = $dayName;
+                        $options[] = $candidate;
+                    }
+                }
+            }
+        }
+        $candidateOptions[$task['task_id']] = $options;
+    }
 
-    $search = function (array $remaining) use (&$search, &$occupied, &$dailyHours, &$assigned, &$nodes, &$failureCounts, $context, $tasks, $nodeLimit): bool {
+    $search = function (array $remaining) use (&$search, &$occupied, &$dailyHours, &$assigned, &$nodes, &$failureCounts, &$slotLoads, $candidateOptions, $slotPositions, $nodeLimit, $deadline): bool {
         if ($remaining === []) {
             return true;
         }
-        if (++$nodes > $nodeLimit) {
+        if (++$nodes > $nodeLimit || microtime(true) >= $deadline) {
             $failureCounts['search_limit'] = ($failureCounts['search_limit'] ?? 0) + 1;
             return false;
         }
@@ -922,25 +1154,43 @@ function solve_schedule(array $tasks, array $context, int $nodeLimit = 100000): 
         $bestIndex = -1;
         $bestCandidates = null;
         foreach ($remaining as $index => $task) {
+            if (microtime(true) >= $deadline) {
+                $failureCounts['search_limit'] = ($failureCounts['search_limit'] ?? 0) + 1;
+                return false;
+            }
             $candidates = [];
-            foreach ($context['rooms'] as $room) {
-                foreach (DAY_NAMES as $day => $dayName) {
-                    foreach ($context['slots'] as $slotIndex => $slot) {
-                        $window = slot_window($context['slots'], $slotIndex, (int) $task['duration_slots']);
-                        if ($window === null) {
-                            continue;
-                        }
-                        $candidate = candidate_for($task, $room, (int) $day, $window, $context, $occupied, $dailyHours);
-                        if ($candidate !== null) {
-                            foreach ($assigned as $existing) {
-                                if ((int) $existing['task']['offering_id'] === (int) $task['offering_id'] && (int) $existing['candidate']['day'] === (int) $candidate['day']) {
-                                    $candidate['cost'] += 4.0;
-                                }
-                            }
-                            $candidate['day_name'] = $dayName;
-                            $candidates[] = $candidate;
+            foreach ($candidateOptions[$task['task_id']] as $baseCandidate) {
+                $available = true;
+                foreach ($baseCandidate['slot_ids'] as $slotId) {
+                    if (isset($occupied[occupancy_key('ROOM', $baseCandidate['room_id'], $baseCandidate['day'], $slotId)])
+                        || isset($occupied[occupancy_key('INSTRUCTOR', $task['instructor_id'], $baseCandidate['day'], $slotId)])
+                        || isset($occupied[occupancy_key('SECTION', $task['section_id'], $baseCandidate['day'], $slotId)])) {
+                        $available = false;
+                        break;
+                    }
+                }
+                $hoursKey = $task['instructor_id'] . ':' . $baseCandidate['day'];
+                if ($available && (float) ($dailyHours[$hoursKey] ?? 0) + $baseCandidate['hours'] > (int) $task['max_hours_day']) {
+                    $available = false;
+                }
+                if ($available) {
+                    $candidate = $baseCandidate;
+                    $sectionAssignments = $occupied['__section_assignments'][$task['section_id']] ?? [];
+                    $withCandidate = $sectionAssignments;
+                    $withCandidate[$candidate['day']][] = $candidate;
+                    $candidate['cost'] += section_schedule_compactness_cost($withCandidate, $slotPositions)
+                        - section_schedule_compactness_cost($sectionAssignments, $slotPositions);
+                    $slotLoad = 0;
+                    foreach ($candidate['slot_ids'] as $slotId) {
+                        $slotLoad += (int) ($slotLoads[$candidate['day'] . ':' . $slotId] ?? 0);
+                    }
+                    $candidate['cost'] += $slotLoad * 10;
+                    foreach ($assigned as $existing) {
+                        if ((int) $existing['task']['offering_id'] === (int) $task['offering_id'] && (int) $existing['candidate']['day'] === (int) $candidate['day']) {
+                            $candidate['cost'] += 4.0;
                         }
                     }
+                    $candidates[] = $candidate;
                 }
             }
             if ($candidates === []) {
@@ -965,14 +1215,23 @@ function solve_schedule(array $tasks, array $context, int $nodeLimit = 100000): 
                 $occupied[occupancy_key('ROOM', $candidate['room_id'], $candidate['day'], $slotId)] = true;
                 $occupied[occupancy_key('INSTRUCTOR', $task['instructor_id'], $candidate['day'], $slotId)] = true;
                 $occupied[occupancy_key('SECTION', $task['section_id'], $candidate['day'], $slotId)] = true;
+                $slotLoads[$candidate['day'] . ':' . $slotId] = ($slotLoads[$candidate['day'] . ':' . $slotId] ?? 0) + 1;
             }
             $hoursKey = $task['instructor_id'] . ':' . $candidate['day'];
             $dailyHours[$hoursKey] = ($dailyHours[$hoursKey] ?? 0) + $candidate['hours'];
+            $occupied['__section_assignments'][(int) $task['section_id']][(int) $candidate['day']][] = $candidate;
             $assigned[$task['task_id']] = ['task' => $task, 'candidate' => $candidate];
             if ($search($nextRemaining)) {
                 return true;
             }
             unset($assigned[$task['task_id']]);
+            array_pop($occupied['__section_assignments'][(int) $task['section_id']][(int) $candidate['day']]);
+            if ($occupied['__section_assignments'][(int) $task['section_id']][(int) $candidate['day']] === []) {
+                unset($occupied['__section_assignments'][(int) $task['section_id']][(int) $candidate['day']]);
+            }
+            if ($occupied['__section_assignments'][(int) $task['section_id']] === []) {
+                unset($occupied['__section_assignments'][(int) $task['section_id']]);
+            }
             $dailyHours[$hoursKey] -= $candidate['hours'];
             if ($dailyHours[$hoursKey] <= 0) {
                 unset($dailyHours[$hoursKey]);
@@ -981,32 +1240,44 @@ function solve_schedule(array $tasks, array $context, int $nodeLimit = 100000): 
                 unset($occupied[occupancy_key('ROOM', $candidate['room_id'], $candidate['day'], $slotId)]);
                 unset($occupied[occupancy_key('INSTRUCTOR', $task['instructor_id'], $candidate['day'], $slotId)]);
                 unset($occupied[occupancy_key('SECTION', $task['section_id'], $candidate['day'], $slotId)]);
+                $slotLoads[$candidate['day'] . ':' . $slotId]--;
+                if ($slotLoads[$candidate['day'] . ':' . $slotId] <= 0) {
+                    unset($slotLoads[$candidate['day'] . ':' . $slotId]);
+                }
             }
         }
         return false;
     };
 
     $success = $search($tasks);
-    return ['success' => $success, 'assignments' => array_values($assigned), 'nodes' => $nodes, 'failure_counts' => $failureCounts, 'soft_cost' => array_sum(array_map(static fn(array $entry): float => (float) $entry['candidate']['cost'], $assigned))];
+    if ($success) {
+        $assigned = compact_schedule_assignments($assigned, $candidateOptions, $slotPositions);
+    }
+    return ['success' => $success, 'assignments' => array_values($assigned), 'nodes' => $nodes, 'failure_counts' => $failureCounts];
 }
 
 function generate_schedule(PDO $pdo, array $user, int $termId): array
 {
     $offerings = load_offerings($pdo, $termId);
     if ($offerings === []) {
-        throw new ApiError(422, 'No active course offerings exist for the selected term.');
+        $diagnostics = ['total_tasks' => 0, 'assigned_tasks' => 0, 'failures' => ['no_offerings' => 1], 'explanations' => ['No active course offerings exist for the selected term.']];
+        record_failed_generation($pdo, $user, $termId, $diagnostics);
+        throw new ApiError(422, 'No active course offerings exist for the selected term.', $diagnostics);
     }
     $context = load_scheduler_context($pdo);
     $preflight = scheduler_preflight($offerings, $context);
     if ($preflight['issues'] !== []) {
-        throw new ApiError(422, $preflight['issues'][0], ['preflight_issues' => $preflight['issues'], 'warnings' => $preflight['warnings'], 'total_tasks' => count(build_tasks($offerings)), 'assigned_tasks' => 0]);
+        $diagnostics = ['preflight_issues' => $preflight['issues'], 'warnings' => $preflight['warnings'], 'total_tasks' => count(build_tasks($offerings)), 'assigned_tasks' => 0, 'failures' => ['preflight' => count($preflight['issues'])], 'explanations' => $preflight['issues']];
+        record_failed_generation($pdo, $user, $termId, $diagnostics);
+        throw new ApiError(422, $preflight['issues'][0], $diagnostics);
     }
     $nodeLimit = (int) ($pdo->query("SELECT setting_value FROM system_settings WHERE setting_key = 'generation_node_limit'")->fetchColumn() ?: 100000);
     $tasks = build_tasks($offerings);
     $solution = solve_schedule($tasks, $context, max(1000, min($nodeLimit, 1000000)));
-    $diagnostics = ['hard_constraints' => ['room_capacity', 'room_type_and_features', 'room_overlap', 'instructor_overlap', 'section_overlap', 'instructor_daily_hours', 'instructor_room_section_availability', 'required_meetings'], 'soft_constraints' => ['instructor_time_preferences', 'spread_repeated_meetings', 'avoid_early_and_late_slots', 'minimize_unused_room_capacity'], 'warnings' => $preflight['warnings'], 'total_tasks' => count($tasks), 'assigned_tasks' => count($solution['assignments']), 'search_nodes' => $solution['nodes'], 'soft_cost' => round((float) $solution['soft_cost'], 3), 'failures' => $solution['failure_counts']];
+    $diagnostics = ['hard_constraints' => ['room_capacity', 'room_type_and_features', 'room_overlap', 'instructor_overlap', 'section_overlap', 'instructor_daily_hours', 'instructor_room_section_availability', 'required_meetings'], 'warnings' => $preflight['warnings'], 'total_tasks' => count($tasks), 'assigned_tasks' => count($solution['assignments']), 'search_nodes' => $solution['nodes'], 'failures' => $solution['failure_counts']];
     if (!$solution['success']) {
         $diagnostics['explanations'] = explain_unscheduled_tasks($tasks, $context);
+        record_failed_generation($pdo, $user, $termId, $diagnostics);
         throw new ApiError(422, 'A complete conflict-free schedule could not be generated. The previous published schedule was preserved.', $diagnostics);
     }
 
@@ -1043,20 +1314,37 @@ function generate_schedule(PDO $pdo, array $user, int $termId): array
     }
 }
 
+function record_failed_generation(PDO $pdo, array $user, int $termId, array $diagnostics): void
+{
+    $stmt = $pdo->prepare("INSERT INTO schedule_runs (term_id, created_by, status, total_tasks, assigned_tasks, diagnostics_json) VALUES (?, ?, 'FAILED', ?, ?, ?)");
+    $stmt->execute([$termId, (int) $user['id'], (int) ($diagnostics['total_tasks'] ?? 0), (int) ($diagnostics['assigned_tasks'] ?? 0), encode_json($diagnostics)]);
+}
+
 function active_entry_context(PDO $pdo, int $termId): array
 {
     $run = active_run($pdo, $termId);
     if (!$run) {
         return ['run' => null, 'entries' => []];
     }
-    $stmt = $pdo->prepare('SELECT se.*, co.subject_id, co.section_id, co.instructor_id, co.enrollment, s.room_type, s.required_features_json, s.duration_slots, i.max_hours_day FROM schedule_entries se JOIN course_offerings co ON co.id = se.offering_id JOIN subjects s ON s.id = co.subject_id JOIN instructors i ON i.id = co.instructor_id WHERE se.run_id = ? AND se.status = \'PUBLISHED\'');
+    $stmt = $pdo->prepare('SELECT se.*, co.subject_id, co.section_id, co.instructor_id, co.enrollment, s.room_type, s.required_features_json, s.duration_slots, i.max_hours_day FROM schedule_entries se JOIN schedule_runs sr ON sr.id = se.run_id AND sr.status = \'PUBLISHED\' JOIN course_offerings co ON co.id = se.offering_id JOIN subjects s ON s.id = co.subject_id JOIN instructors i ON i.id = co.instructor_id WHERE se.run_id = ? AND se.status = \'PUBLISHED\'');
     $stmt->execute([(int) $run['id']]);
     $entries = $stmt->fetchAll();
+    $occupancyStmt = $pdo->prepare("SELECT entry_id, slot_id FROM schedule_occupancy WHERE run_id = ? AND resource_type = 'ROOM'");
+    $occupancyStmt->execute([(int) $run['id']]);
+    $occupiedSlots = [];
+    foreach ($occupancyStmt->fetchAll() as $row) {
+        $occupiedSlots[(int) $row['entry_id']][] = (int) $row['slot_id'];
+    }
+    foreach ($entries as &$entry) {
+        $entry['occupied_slot_ids'] = $occupiedSlots[(int) $entry['id']] ?? [];
+    }
+    unset($entry);
     return ['run' => $run, 'entries' => $entries];
 }
 
-function validate_manual_candidate(PDO $pdo, int $termId, int $offeringId, int $roomId, int $day, int $slotId, ?int $ignoreEntryId = null): array
+function validate_manual_candidate(PDO $pdo, int $termId, int $offeringId, int $roomId, int $day, int $slotId, ?int $ignoreEntryId = null, bool $requestProposal = false, ?array $requestedTime = null): array
 {
+    $ignoreEntryId = $ignoreEntryId !== null && (int) $ignoreEntryId > 0 ? (int) $ignoreEntryId : null;
     if (!isset(DAY_NAMES[$day])) {
         throw new ApiError(422, 'Schedules may only be placed Monday through Friday.');
     }
@@ -1077,6 +1365,19 @@ function validate_manual_candidate(PDO $pdo, int $termId, int $offeringId, int $
     if (!$room) {
         throw new ApiError(422, 'Room is not available.');
     }
+    if (!$requestProposal && (int) $room['capacity'] < (int) $offering['enrollment']) {
+        throw new ApiError(409, 'The selected room does not have enough seats for this class.');
+    }
+    if (!$requestProposal && (string) $room['room_type'] !== (string) $offering['room_type']) {
+        throw new ApiError(409, sprintf('The selected room is a %s room, but this class requires a %s room.', strtolower((string) $room['room_type']), strtolower((string) $offering['room_type'])));
+    }
+    if (!$requestProposal) {
+        $roomFeatures = array_map('strtolower', array_map('strval', $room['features'] ?? []));
+        $missingFeatures = array_values(array_filter(json_array($offering['required_features_json']), static fn($feature): bool => !in_array(strtolower((string) $feature), $roomFeatures, true)));
+        if ($missingFeatures !== []) {
+            throw new ApiError(409, 'The selected room is missing required features: ' . implode(', ', $missingFeatures) . '.');
+        }
+    }
     $slotIndex = null;
     foreach ($context['slots'] as $index => $slot) {
         if ((int) $slot['id'] === $slotId) {
@@ -1087,9 +1388,25 @@ function validate_manual_candidate(PDO $pdo, int $termId, int $offeringId, int $
     if ($slotIndex === null) {
         throw new ApiError(422, 'Time slot is invalid.');
     }
-    $window = slot_window($context['slots'], $slotIndex, max(1, (int) $offering['duration_slots']));
-    if ($window === null) {
-        throw new ApiError(422, 'The subject duration does not fit within the selected day.');
+    if ($requestProposal && $requestedTime !== null) {
+        [$requestedStart, $requestedEnd] = $requestedTime;
+        $window = array_values(array_filter($context['slots'], static fn(array $slot): bool => $slot['start_time'] < $requestedEnd && $slot['end_time'] > $requestedStart));
+        if ($window === []) {
+            throw new ApiError(422, 'The requested time does not overlap a configured timetable slot.');
+        }
+        if ($window[0]['start_time'] !== $requestedStart || $window[count($window) - 1]['end_time'] !== $requestedEnd) {
+            throw new ApiError(422, 'The requested time must fit fully within configured timetable slots.');
+        }
+        for ($index = 1; $index < count($window); $index++) {
+            if ($window[$index - 1]['end_time'] !== $window[$index]['start_time']) {
+                throw new ApiError(422, 'The requested time cannot span a gap in the timetable.');
+            }
+        }
+    } else {
+        $window = slot_window($context['slots'], $slotIndex, max(1, (int) $offering['duration_slots']));
+        if ($window === null) {
+            throw new ApiError(422, 'The subject duration does not fit within the selected day.');
+        }
     }
     $active = active_entry_context($pdo, $termId);
     $occupied = [];
@@ -1098,36 +1415,350 @@ function validate_manual_candidate(PDO $pdo, int $termId, int $offeringId, int $
         if ($ignoreEntryId !== null && (int) $entry['id'] === $ignoreEntryId) {
             continue;
         }
-        $entrySlotIndex = null;
-        foreach ($context['slots'] as $index => $slot) {
-            if ((int) $slot['id'] === (int) $entry['slot_id']) {
-                $entrySlotIndex = $index;
-                break;
+        $entryWindow = [];
+        if ($entry['occupied_slot_ids'] !== []) {
+            foreach ($entry['occupied_slot_ids'] as $occupiedSlotId) {
+                foreach ($context['slots'] as $slot) {
+                    if ((int) $slot['id'] === $occupiedSlotId) {
+                        $entryWindow[] = $slot;
+                        break;
+                    }
+                }
+            }
+        } else {
+            $entrySlotIndex = null;
+            foreach ($context['slots'] as $index => $slot) {
+                if ((int) $slot['id'] === (int) $entry['slot_id']) {
+                    $entrySlotIndex = $index;
+                    break;
+                }
+            }
+            if ($entrySlotIndex !== null) {
+                $entryWindow = slot_window($context['slots'], $entrySlotIndex, max(1, (int) $entry['duration_slots'])) ?: [];
             }
         }
-        if ($entrySlotIndex === null) {
-            continue;
-        }
-        $entryWindow = slot_window($context['slots'], $entrySlotIndex, max(1, (int) $entry['duration_slots']));
         $entryHours = 0.0;
-        foreach ($entryWindow ?: [] as $entrySlot) {
+        foreach ($entryWindow as $entrySlot) {
             $slotValue = (int) $entrySlot['id'];
             $occupied[occupancy_key('ROOM', (int) $entry['room_id'], (int) $entry['day_of_week'], $slotValue)] = true;
             $occupied[occupancy_key('INSTRUCTOR', (int) $entry['instructor_id'], (int) $entry['day_of_week'], $slotValue)] = true;
             $occupied[occupancy_key('SECTION', (int) $entry['section_id'], (int) $entry['day_of_week'], $slotValue)] = true;
             $entryHours += (strtotime($entrySlot['end_time']) - strtotime($entrySlot['start_time'])) / 3600;
         }
-        if ($entryWindow !== null && isset(DAY_NAMES[(int) $entry['day_of_week']])) {
+        if ($entryWindow !== [] && isset(DAY_NAMES[(int) $entry['day_of_week']])) {
+            if (!empty($entry['end_time_override'])) {
+                $entryHours = max(0, (strtotime((string) $entry['end_time_override']) - strtotime((string) $entryWindow[0]['start_time'])) / 3600);
+            }
             $hoursKey = (int) $entry['instructor_id'] . ':' . (int) $entry['day_of_week'];
             $dailyHours[$hoursKey] = ($dailyHours[$hoursKey] ?? 0) + $entryHours;
         }
     }
     $task = ['enrollment' => (int) $offering['enrollment'], 'room_type' => $offering['room_type'], 'required_features' => json_array($offering['required_features_json']), 'instructor_id' => (int) $offering['instructor_id'], 'section_id' => (int) $offering['section_id'], 'max_hours_day' => (int) $offering['max_hours_day']];
-    $candidate = candidate_for($task, $room, $day, $window, $context, $occupied, $dailyHours);
+    $candidate = candidate_for($task, $room, $day, $window, $context, $occupied, $dailyHours, $requestProposal);
     if ($candidate === null) {
-        throw new ApiError(409, 'The selected room, time, instructor, or section conflicts with a hard constraint.');
+        if ($requestProposal) {
+            throw new ApiError(409, 'The selected time conflicts with an existing room, instructor, or section schedule.');
+        }
+        throw new ApiError(409, 'The selected time conflicts with a schedule, availability rule, or instructor daily-hour limit.');
     }
     return ['offering' => $offering, 'candidate' => $candidate, 'run' => $active['run']];
+}
+
+function parse_room_request_times(array $input): array
+{
+    $start = str_replace(':', '', input_string($input, 'start_time', 5));
+    $startPeriod = strtoupper(input_string($input, 'start_period', 2));
+    $end = str_replace(':', '', input_string($input, 'end_time', 5));
+    $endPeriod = strtoupper(input_string($input, 'end_period', 2));
+    if (!preg_match('/^(0[1-9]|1[0-2])[0-5][0-9]$/', $start) || !in_array($startPeriod, ['AM', 'PM'], true)
+        || !preg_match('/^(0[1-9]|1[0-2])[0-5][0-9]$/', $end) || !in_array($endPeriod, ['AM', 'PM'], true)) {
+        throw new ApiError(422, 'Use valid 12-hour times in HH:MM format with AM or PM.');
+    }
+    $toMinutes = static function (string $value, string $period): int {
+        $hour = (int) substr($value, 0, 2);
+        $minute = (int) substr($value, 2, 2);
+        if ($period === 'AM' && $hour === 12) $hour = 0;
+        if ($period === 'PM' && $hour !== 12) $hour += 12;
+        return $hour * 60 + $minute;
+    };
+    $startMinutes = $toMinutes($start, $startPeriod);
+    $endMinutes = $toMinutes($end, $endPeriod);
+    if ($endMinutes <= $startMinutes) {
+        throw new ApiError(422, 'End time must be later than start time.');
+    }
+
+    $date = input_string($input, 'request_date', 10, false);
+    if ($date === '' && preg_match('/^\[REQUEST_DATE:(\d{4}-\d{2}-\d{2})\]/', (string) ($input['note'] ?? ''), $match)) {
+        $date = $match[1];
+    }
+    $dateValue = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+    $dateErrors = DateTimeImmutable::getLastErrors();
+    if (!$dateValue || ($dateErrors !== false && ($dateErrors['warning_count'] > 0 || $dateErrors['error_count'] > 0)) || $dateValue->format('Y-m-d') !== $date) {
+        throw new ApiError(422, 'Choose a valid exact date for the room request.');
+    }
+    $day = (int) $dateValue->format('N');
+    if ($day < 1 || $day > 5 || input_int($input, 'day_of_week', 1, 5) !== $day) {
+        throw new ApiError(422, 'The selected day does not match the exact request date.');
+    }
+
+    return [
+        'date' => $date,
+        'day' => $day,
+        'start' => sprintf('%02d:%02d', intdiv($startMinutes, 60), $startMinutes % 60),
+        'end' => sprintf('%02d:%02d', intdiv($endMinutes, 60), $endMinutes % 60),
+    ];
+}
+
+function room_request_conflicts(PDO $pdo, int $roomId, int $instructorId, int $sectionId, int $offeringId, int $termId, int $day, string $date, string $start, string $end, ?int $excludeRequestId = null): array
+{
+    $conflicts = [];
+    $schedule = $pdo->prepare("SELECT co.id AS offering_id, se.room_id, co.instructor_id, co.section_id, s.name AS subject_name, ts.start_time, COALESCE(se.end_time_override, (SELECT ts_end.end_time FROM time_slots ts_end WHERE ts_end.slot_order = ts.slot_order + s.duration_slots - 1), ts.end_time) AS end_time FROM schedule_entries se JOIN schedule_runs sr ON sr.id = se.run_id AND sr.status = 'PUBLISHED' JOIN course_offerings co ON co.id = se.offering_id JOIN subjects s ON s.id = co.subject_id JOIN time_slots ts ON ts.id = se.slot_id WHERE (se.room_id = ? OR co.instructor_id = ? OR co.section_id = ?) AND co.id <> ? AND se.day_of_week = ? AND se.status = 'PUBLISHED' AND co.term_id = ?");
+    $schedule->execute([$roomId, $instructorId, $sectionId, $offeringId, $day, $termId]);
+    foreach ($schedule->fetchAll() as $booking) {
+        if ($booking['start_time'] < $end && $booking['end_time'] > $start) {
+            $resource = (int) $booking['room_id'] === $roomId ? 'Room' : ((int) $booking['instructor_id'] === $instructorId ? 'Instructor' : 'Class section');
+            $key = $resource . '|' . $booking['start_time'] . '|' . $booking['end_time'];
+            $conflicts[$key] = ['start_time' => $booking['start_time'], 'end_time' => $booking['end_time'], 'resource' => $resource, 'description' => $resource . ' conflict: ' . $booking['subject_name']];
+        }
+    }
+
+    $requests = $pdo->prepare("SELECT sr.id, sr.room_id, sr.instructor_id, co.section_id, sr.status, s.name AS subject_name, ts.start_time, COALESCE(sr.requested_end_time, ts.end_time) AS end_time FROM schedule_requests sr JOIN course_offerings co ON co.id = sr.offering_id JOIN subjects s ON s.id = co.subject_id JOIN time_slots ts ON ts.id = sr.slot_id WHERE (sr.room_id = ? OR sr.instructor_id = ? OR co.section_id = ?) AND sr.term_id = ? AND sr.day_of_week = ? AND sr.status IN ('PENDING', 'APPROVED') AND (sr.request_date = ? OR (sr.request_date IS NULL AND sr.note LIKE ?)) AND (? IS NULL OR sr.id <> ?)");
+    $requests->execute([$roomId, $instructorId, $sectionId, $termId, $day, $date, '[REQUEST_DATE:' . $date . ']%', $excludeRequestId, $excludeRequestId]);
+    foreach ($requests->fetchAll() as $request) {
+        if ($request['start_time'] < $end && $request['end_time'] > $start) {
+            $resource = (int) $request['room_id'] === $roomId ? 'Room' : ((int) $request['instructor_id'] === $instructorId ? 'Instructor' : 'Class section');
+            $key = $resource . '|' . $request['start_time'] . '|' . $request['end_time'];
+            $conflicts[$key] ??= ['start_time' => $request['start_time'], 'end_time' => $request['end_time'], 'resource' => $resource, 'description' => ucfirst(strtolower($request['status'])) . ' ' . strtolower($resource) . ' request: ' . $request['subject_name']];
+        }
+    }
+
+    $conflicts = array_values($conflicts);
+    usort($conflicts, static fn(array $left, array $right): int => strcmp($left['start_time'], $right['start_time']));
+    return $conflicts;
+}
+
+function check_room_availability(PDO $pdo, array $user, array $input): array
+{
+    $offeringId = input_int($input, 'offering_id', 1, 100000000);
+    $roomId = input_int($input, 'room_id', 1, 100000000);
+    $slotId = input_int($input, 'slot_id', 1, 100000000);
+    $times = parse_room_request_times($input);
+    $termId = active_term_id($pdo);
+
+    if (empty($user['instructor_id'])) {
+        throw new ApiError(403, 'Your account is not linked to a faculty record.');
+    }
+    $offering = $pdo->prepare("SELECT id, instructor_id, section_id FROM course_offerings WHERE id = ? AND term_id = ? AND instructor_id = ? AND status = 'ACTIVE'");
+    $offering->execute([$offeringId, $termId, (int) $user['instructor_id']]);
+    $offeringRecord = $offering->fetch();
+    if (!$offeringRecord) {
+        throw new ApiError(404, 'Class assignment not found.');
+    }
+    $room = $pdo->prepare('SELECT id FROM rooms WHERE id = ? AND active = 1');
+    $room->execute([$roomId]);
+    if (!$room->fetchColumn()) {
+        throw new ApiError(404, 'Room not found.');
+    }
+
+    $slot = $pdo->prepare('SELECT start_time FROM time_slots WHERE id = ?');
+    $slot->execute([$slotId]);
+    if ($slot->fetchColumn() !== $times['start']) {
+        throw new ApiError(422, 'The selected start time must match a configured timetable slot.');
+    }
+    $slots = $pdo->query('SELECT start_time, end_time FROM time_slots ORDER BY slot_order')->fetchAll();
+    $window = array_values(array_filter($slots, static fn(array $timeSlot): bool => $timeSlot['start_time'] < $times['end'] && $timeSlot['end_time'] > $times['start']));
+    if ($window === [] || $window[0]['start_time'] !== $times['start'] || $window[count($window) - 1]['end_time'] !== $times['end']) {
+        throw new ApiError(422, 'The requested time must fit fully within configured timetable slots.');
+    }
+    for ($index = 1; $index < count($window); $index++) {
+        if ($window[$index - 1]['end_time'] !== $window[$index]['start_time']) {
+            throw new ApiError(422, 'The requested time cannot span a gap in the timetable.');
+        }
+    }
+
+    $conflicts = room_request_conflicts($pdo, $roomId, (int) $offeringRecord['instructor_id'], (int) $offeringRecord['section_id'], $offeringId, $termId, $times['day'], $times['date'], $times['start'], $times['end']);
+    $run = active_run($pdo, $termId);
+    $ignoreEntryId = null;
+    if ($run !== null) {
+        $entry = $pdo->prepare("SELECT id FROM schedule_entries WHERE run_id = ? AND offering_id = ? AND status = 'PUBLISHED' ORDER BY id DESC LIMIT 1");
+        $entry->execute([(int) $run['id'], $offeringId]);
+        $entryId = $entry->fetchColumn();
+        if ($entryId !== false) {
+            $ignoreEntryId = (int) $entryId;
+        }
+    }
+    try {
+        validate_manual_candidate($pdo, $termId, $offeringId, $roomId, $times['day'], $slotId, $ignoreEntryId, true, [$times['start'], $times['end']]);
+    } catch (ApiError $error) {
+        if ($error->status !== 409) {
+            throw $error;
+        }
+        if ($conflicts === []) {
+            $conflicts[] = ['start_time' => $times['start'], 'end_time' => $times['end'], 'resource' => 'Instructor or class section', 'description' => $error->getMessage()];
+        }
+    }
+    return ['available' => $conflicts === [], 'conflicts' => $conflicts, 'request_start_time' => $times['start'], 'requested_end_time' => $times['end']];
+}
+
+function validate_room_request_submission(PDO $pdo, array $input, array $user): void
+{
+    $availability = check_room_availability($pdo, $user, $input);
+    if (!$availability['available']) {
+        throw new ApiError(409, 'The room, instructor, or class section is occupied for part of this time.', ['conflicts' => $availability['conflicts']]);
+    }
+}
+
+function available_rooms_for_request(PDO $pdo, array $user, array $input): array
+{
+    $rooms = $pdo->query('SELECT id, code, name, room_type FROM rooms WHERE active = 1 ORDER BY code')->fetchAll();
+    $available = [];
+    $blockers = [];
+    foreach ($rooms as $room) {
+        $roomInput = $input;
+        $roomInput['room_id'] = (int) $room['id'];
+        $result = check_room_availability($pdo, $user, $roomInput);
+        $roomBlocked = false;
+        foreach ($result['conflicts'] as $conflict) {
+            if ($conflict['resource'] === 'Room') {
+                $roomBlocked = true;
+                continue;
+            }
+            $key = implode('|', [$conflict['resource'], $conflict['start_time'], $conflict['end_time'], $conflict['description']]);
+            $blockers[$key] = $conflict;
+        }
+        if (!$roomBlocked) {
+            $available[] = $room;
+        }
+    }
+    return ['rooms' => $available, 'request_blockers' => array_values($blockers)];
+}
+
+function create_room_request(PDO $pdo, array $user, array $input): array
+{
+    $offeringId = input_int($input, 'offering_id', 1, 100000000);
+    $roomId = input_int($input, 'room_id', 1, 100000000);
+    $slotId = input_int($input, 'slot_id', 1, 100000000);
+    if (empty($user['instructor_id'])) {
+        throw new ApiError(403, 'Your account is not linked to a faculty record.');
+    }
+
+    $times = parse_room_request_times($input);
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        $input['slot_id'] = $slotId;
+        validate_room_request_submission($pdo, $input, $user);
+
+        $termId = active_term_id($pdo);
+        $note = trim((string) ($input['note'] ?? ''));
+        $insert = $pdo->prepare('INSERT INTO schedule_requests(term_id, offering_id, instructor_id, room_id, request_date, day_of_week, slot_id, requested_end_time, note) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $insert->execute([$termId, $offeringId, (int) $user['instructor_id'], $roomId, $times['date'], $times['day'], $slotId, $times['end'], $note]);
+        $requestId = (int) $pdo->lastInsertId();
+        audit($pdo, $user, 'REQUEST_SCHEDULE', 'schedule_request', $requestId);
+        $pdo->exec('COMMIT');
+    } catch (Throwable $error) {
+        try { $pdo->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
+        throw $error;
+    }
+
+    return ['snapshot' => bootstrap($pdo, $user)];
+}
+
+function prepare_schedule_request_approval(PDO $pdo, array $input): void
+{
+    $requestId = input_int($input, 'request_id', 1, 100000000);
+    $request = $pdo->prepare("SELECT * FROM schedule_requests WHERE id=? AND status='PENDING'");
+    $request->execute([$requestId]);
+    $row = $request->fetch();
+    if (!$row) {
+        return;
+    }
+    $existing = $pdo->prepare("SELECT se.id FROM schedule_entries se JOIN schedule_runs sr ON sr.id=se.run_id AND sr.status='PUBLISHED' WHERE se.offering_id=? AND se.status='PUBLISHED' ORDER BY se.id DESC LIMIT 1");
+    $existing->execute([(int) $row['offering_id']]);
+    $entryId = $existing->fetchColumn();
+    if ($entryId === false) {
+        return;
+    }
+    validate_manual_candidate($pdo, (int) $row['term_id'], (int) $row['offering_id'], (int) $row['room_id'], (int) $row['day_of_week'], (int) $row['slot_id'], (int) $entryId);
+    $pdo->prepare('DELETE FROM schedule_occupancy WHERE entry_id=?')->execute([(int) $entryId]);
+    $pdo->prepare('DELETE FROM schedule_entries WHERE id=?')->execute([(int) $entryId]);
+}
+
+function review_schedule_request(PDO $pdo, array $user, array $input): array
+{
+    $id = input_int($input, 'request_id', 1, 100000000);
+    $decision = (string) ($input['decision'] ?? '');
+    if (!in_array($decision, ['APPROVE', 'REJECT'], true)) {
+        throw new ApiError(422, 'Invalid decision.');
+    }
+    $query = $pdo->prepare("SELECT * FROM schedule_requests WHERE id=? AND status='PENDING'");
+    $query->execute([$id]);
+    $request = $query->fetch();
+    if (!$request) {
+        throw new ApiError(404, 'Request not found.');
+    }
+    if ($decision === 'REJECT') {
+        $pdo->prepare("UPDATE schedule_requests SET status='REJECTED', reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int) $user['id'], $id]);
+        return ['snapshot' => bootstrap($pdo, $user)];
+    }
+
+    $pdo->exec('BEGIN IMMEDIATE');
+    try {
+        $query->execute([$id]);
+        $request = $query->fetch();
+        if (!$request) {
+            throw new ApiError(409, 'This request has already been reviewed.');
+        }
+        $run = active_run($pdo, (int) $request['term_id']);
+        if (!$run) {
+            throw new ApiError(409, 'Generate a schedule before approving requests.');
+        }
+        $existing = $pdo->prepare("SELECT se.id FROM schedule_entries se WHERE se.run_id=? AND se.offering_id=? AND se.status='PUBLISHED' ORDER BY se.id DESC LIMIT 1");
+        $existing->execute([(int) $run['id'], (int) $request['offering_id']]);
+        $entryId = $existing->fetchColumn();
+        $slotStmt = $pdo->prepare('SELECT start_time, end_time FROM time_slots WHERE id = ?');
+        $slotStmt->execute([(int) $request['slot_id']]);
+        $requestSlot = $slotStmt->fetch();
+        if (!$requestSlot) {
+            throw new ApiError(422, 'The requested start time is no longer available.');
+        }
+        $requestedEnd = (string) ($request['requested_end_time'] ?: $requestSlot['end_time']);
+        $requestedTime = [(string) $requestSlot['start_time'], $requestedEnd];
+        $requestDate = (string) ($request['request_date'] ?? '');
+        if ($requestDate === '' && preg_match('/^\[REQUEST_DATE:(\d{4}-\d{2}-\d{2})\]/', (string) $request['note'], $dateMatch)) {
+            $requestDate = $dateMatch[1];
+        }
+        if ($requestDate !== '') {
+            $offering = $pdo->prepare('SELECT section_id FROM course_offerings WHERE id = ?');
+            $offering->execute([(int) $request['offering_id']]);
+            $sectionId = (int) $offering->fetchColumn();
+            $conflicts = room_request_conflicts($pdo, (int) $request['room_id'], (int) $request['instructor_id'], $sectionId, (int) $request['offering_id'], (int) $request['term_id'], (int) $request['day_of_week'], $requestDate, $requestedTime[0], $requestedTime[1], $id);
+            if ($conflicts !== []) {
+                throw new ApiError(409, 'The room, instructor, or class section is occupied for part of this time.', ['conflicts' => $conflicts]);
+            }
+        }
+        $validated = validate_manual_candidate($pdo, (int) $request['term_id'], (int) $request['offering_id'], (int) $request['room_id'], (int) $request['day_of_week'], (int) $request['slot_id'], $entryId !== false ? (int) $entryId : null, true, $requestedTime);
+        if ($entryId !== false) {
+            $entryId = (int) $entryId;
+            $pdo->prepare('DELETE FROM schedule_occupancy WHERE entry_id=?')->execute([$entryId]);
+            $pdo->prepare('UPDATE schedule_entries SET room_id=?, day_of_week=?, slot_id=?, end_time_override=? WHERE id=?')->execute([(int) $request['room_id'], (int) $request['day_of_week'], (int) $request['slot_id'], $requestedEnd, $entryId]);
+        } else {
+            $pdo->prepare("INSERT INTO schedule_entries(run_id,offering_id,meeting_no,room_id,day_of_week,slot_id,end_time_override,status) VALUES(?,?,?,?,?,?,?, 'PUBLISHED')")->execute([(int) $run['id'], (int) $request['offering_id'], 1, (int) $request['room_id'], (int) $request['day_of_week'], (int) $request['slot_id'], $requestedEnd]);
+            $entryId = (int) $pdo->lastInsertId();
+        }
+        $occupancy = $pdo->prepare('INSERT INTO schedule_occupancy(run_id,entry_id,resource_type,resource_id,day_of_week,slot_id) VALUES(?,?,?,?,?,?)');
+        foreach ($validated['candidate']['slot_ids'] as $slot) {
+            foreach ([['ROOM', (int) $request['room_id']], ['INSTRUCTOR', (int) $request['instructor_id']], ['SECTION', (int) $validated['offering']['section_id']] ] as $resource) {
+                $occupancy->execute([(int) $run['id'], $entryId, $resource[0], $resource[1], (int) $request['day_of_week'], $slot]);
+            }
+        }
+        $pdo->prepare("UPDATE schedule_requests SET status='APPROVED', reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int) $user['id'], $id]);
+        audit($pdo, $user, 'APPROVE_SCHEDULE_REQUEST', 'schedule_request', $id, ['entry_id' => $entryId]);
+        $pdo->exec('COMMIT');
+    } catch (Throwable $error) {
+        try { $pdo->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
+        throw $error;
+    }
+    return ['snapshot' => bootstrap($pdo, $user)];
 }
 
 function save_master(PDO $pdo, array $user, array $input): array
@@ -1153,6 +1784,11 @@ function save_master(PDO $pdo, array $user, array $input): array
             $adminCount = (int) $pdo->query("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1")->fetchColumn();
             $target = $pdo->prepare('SELECT role FROM users WHERE id = ? AND active = 1'); $target->execute([$recordId]);
             if ($target->fetchColumn() === 'admin' && $adminCount <= 1) throw new ApiError(409, 'At least one active administrator is required.');
+        }
+        if ($entity === 'rooms') {
+            $pending = $pdo->prepare("SELECT COUNT(*) FROM schedule_requests WHERE room_id=? AND status='PENDING'");
+            $pending->execute([$recordId]);
+            if ((int) $pending->fetchColumn() > 0) throw new ApiError(409, 'This room has a pending request and cannot be deactivated yet.');
         }
         $sql = $entity === 'offerings' ? "UPDATE course_offerings SET status='INACTIVE' WHERE id=? AND status='ACTIVE'" : "UPDATE {$table} SET active=0 WHERE id=? AND active=1";
         $stmt = $pdo->prepare($sql);
@@ -1183,7 +1819,7 @@ function save_master(PDO $pdo, array $user, array $input): array
         if ($recordId) { $stmt=$pdo->prepare('UPDATE subjects SET code=?,name=?,units=?,hours_per_week=?,duration_slots=?,room_type=?,required_features_json=? WHERE id=?'); $stmt->execute([$code,$name,$units,$hours,$duration,$type,encode_json($features),$recordId]); }
         else { $stmt=$pdo->prepare('INSERT INTO subjects (code,name,units,hours_per_week,duration_slots,room_type,required_features_json) VALUES (?,?,?,?,?,?,?)'); $stmt->execute([$code,$name,$units,$hours,$duration,$type,encode_json($features)]); $recordId=db_insert_id($pdo, 'subjects'); }
     } elseif ($entity === 'sections') {
-        $programId=input_int($data,'program_id',1,100000000); $termId=input_int($data,'term_id',1,100000000); $code=input_code($data,'code'); $year=input_int($data,'year_level',1,8); $count=input_int($data,'student_count',1,5000);
+        $programId=input_int($data,'program_id',1,100000000); $termId=input_int($data,'term_id',1,100000000); $code=input_code($data,'code'); $year=input_int($data,'year_level',1,4); $count=input_int($data,'student_count',1,5000);
         assert_reference($pdo, 'programs', $programId, 'Program', 'active = 1');
         assert_reference($pdo, 'academic_terms', $termId, 'Academic term');
         if ($recordId) { $stmt=$pdo->prepare('UPDATE sections SET program_id=?,term_id=?,code=?,year_level=?,student_count=? WHERE id=?'); $stmt->execute([$programId,$termId,$code,$year,$count,$recordId]); }
@@ -1310,12 +1946,37 @@ function handle(PDO $pdo): never
             throw new ApiError(422, 'The security answer is incorrect or expired. Try the new image.', login_captcha_issue());
         }
         if ($username === '' || strlen($username) > 80 || $password === '' || (function_exists('mb_strlen') ? mb_strlen($password) : strlen($password)) > 200) login_failure($pdo, $username, $ipKey, $accountKey, $now, 'invalid_input');
-        $stmt = $pdo->prepare('SELECT * FROM users WHERE username = ? AND active = 1 LIMIT 1'); $stmt->execute([$username]); $record = $stmt->fetch();
+        $stmt = $pdo->prepare('SELECT * FROM users WHERE username = ? AND active = 1 LIMIT 1'); 
+        $stmt->execute([$username]); 
+        $record = $stmt->fetch();
         if (!$record || !password_verify($password, $record['password_hash'])) login_failure($pdo, $username, $ipKey, $accountKey, $now, 'invalid_credentials');
         $pdo->prepare('DELETE FROM login_throttles WHERE throttle_key IN (?, ?)')->execute([$ipKey, $accountKey]);
         easysched_captcha_clear();
-        session_regenerate_id(true); $_SESSION['user_id']=(int)$record['id']; $_SESSION['csrf']=bin2hex(random_bytes(32));
-        $user=current_user($pdo); audit($pdo,$user,'LOGIN'); $snapshot = bootstrap($pdo,$user); $snapshot['security_alert'] = recent_login_security_alert($pdo, (string) $user['username']); respond(['ok'=>true,'data'=>$snapshot]);
+        session_regenerate_id(true); 
+        $_SESSION['user_id'] = (int)$record['id']; 
+        $_SESSION['csrf'] = bin2hex(random_bytes(32));
+        
+        // Get current user and prepare response data
+        $user = current_user($pdo);
+        if (!$user) throw new ApiError(500, 'Failed to retrieve user session');
+        
+        // Log login and get additional data
+        audit($pdo, $user, 'LOGIN');
+        
+        // Prepare the snapshot
+        try {
+            $snapshot = bootstrap($pdo, $user);
+        } catch (Throwable $e) {
+            error_log('Bootstrap error during login: ' . $e->getMessage());
+            throw new ApiError(500, 'Failed to load user data.');
+        }
+        
+        // Get security alert if applicable
+        $snapshot['security_alert'] = recent_login_security_alert($pdo, (string) $user['username']);
+        
+        // Send response
+        respond(['ok' => true, 'data' => $snapshot]);
+
     }
     if ($action === 'register') {
         if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') throw new ApiError(405, 'POST is required.');
@@ -1347,14 +2008,27 @@ function handle(PDO $pdo): never
     }
 
     $user = require_auth($pdo);
-    if (in_array($action, ['generate','save_schedule','delete_schedule','save_master','change_password','save_settings','review_registration','request_schedule','review_schedule_request'], true)) require_csrf($input);
+    if (in_array($action, ['generate','save_schedule','delete_schedule','save_master','change_password','save_settings','review_registration','request_schedule','review_schedule_request','check_room_availability','available_rooms'], true)) require_csrf($input);
+    if ($action === 'available_rooms') {
+        require_auth($pdo, ['instructor']);
+        respond(['ok' => true, 'data' => available_rooms_for_request($pdo, $user, $input)]);
+    }
+    if ($action === 'check_room_availability') {
+        require_auth($pdo, ['instructor']);
+        respond(['ok' => true, 'data' => check_room_availability($pdo, $user, $input)]);
+    }
+    if ($action === 'request_schedule') {
+        require_auth($pdo, ['instructor']);
+        respond(['ok' => true, 'data' => create_room_request($pdo, $user, $input)]);
+    }
+    if ($action === 'review_schedule_request') respond(['ok' => true, 'data' => review_schedule_request($pdo, $user, $input)]);
     if ($action === 'bootstrap') respond(['ok'=>true,'data'=>bootstrap($pdo,$user)]);
     if ($action === 'export') export_csv($pdo,$user,active_term_id($pdo));
     if ($action === 'generate') { require_auth($pdo,['admin','scheduler']); $termId=input_int($input,'term_id',1,100000000,false)??active_term_id($pdo); if ($termId !== active_term_id($pdo)) throw new ApiError(422, 'Only the active academic term can be generated.'); $result=generate_schedule($pdo,$user,$termId); respond(['ok'=>true,'data'=>array_merge($result,['snapshot'=>bootstrap($pdo,$user)])]); }
     if ($action === 'save_master') { require_auth($pdo,['admin','scheduler']); $result=save_master($pdo,$user,$input); respond(['ok'=>true,'data'=>array_merge($result,['snapshot'=>bootstrap($pdo,$user)])]); }
     if ($action === 'review_registration') { require_auth($pdo, ['admin']); $result = review_registration($pdo, $user, $input); respond(['ok' => true, 'data' => array_merge($result, ['snapshot' => bootstrap($pdo, $user)])]); }
-    if ($action === 'request_schedule') { require_auth($pdo, ['instructor']); $offeringId=input_int($input,'offering_id',1,100000000); $roomId=input_int($input,'room_id',1,100000000); $day=input_int($input,'day_of_week',1,7); $slotId=input_int($input,'slot_id',1,100000000); $note=trim((string)($input['note']??'')); $termId=active_term_id($pdo); $q=$pdo->prepare('SELECT id FROM course_offerings WHERE id=? AND term_id=? AND instructor_id=? AND status=\'ACTIVE\''); $q->execute([$offeringId,$termId,(int)$user['instructor_id']]); if(!$q->fetchColumn()) throw new ApiError(404,'Offering not found.'); $pdo->prepare('INSERT INTO schedule_requests(term_id,offering_id,instructor_id,room_id,day_of_week,slot_id,note) VALUES(?,?,?,?,?,?,?)')->execute([$termId,$offeringId,(int)$user['instructor_id'],$roomId,$day,$slotId,$note]); audit($pdo,$user,'REQUEST_SCHEDULE','schedule_request',(int)$pdo->lastInsertId()); respond(['ok'=>true,'data'=>['snapshot'=>bootstrap($pdo,$user)]]); }
-    if ($action === 'review_schedule_request') { require_auth($pdo,['admin']); $id=input_int($input,'request_id',1,100000000); $decision=(string)($input['decision']??''); if(!in_array($decision,['APPROVE','REJECT'],true)) throw new ApiError(422,'Invalid decision.'); $q=$pdo->prepare('SELECT * FROM schedule_requests WHERE id=? AND status=\'PENDING\''); $q->execute([$id]); $req=$q->fetch(); if(!$req) throw new ApiError(404,'Request not found.'); if($decision==='APPROVE'){ $run=active_run($pdo,(int)$req['term_id']); if(!$run) throw new ApiError(409,'Generate a schedule before approving requests.'); $validated=validate_manual_candidate($pdo,(int)$req['term_id'],(int)$req['offering_id'],(int)$req['room_id'],(int)$req['day_of_week'],(int)$req['slot_id'],0); $pdo->beginTransaction(); try{$pdo->prepare("INSERT INTO schedule_entries(run_id,offering_id,meeting_no,room_id,day_of_week,slot_id,status) VALUES(?,?,?,?,?,?,\'PUBLISHED\')")->execute([(int)$run['id'],(int)$req['offering_id'],1,(int)$req['room_id'],(int)$req['day_of_week'],(int)$req['slot_id']]); $entryId=(int)$pdo->lastInsertId(); $ins=$pdo->prepare('INSERT INTO schedule_occupancy(run_id,entry_id,resource_type,resource_id,day_of_week,slot_id) VALUES(?,?,?,?,?,?)'); foreach($validated['candidate']['slot_ids'] as $slot){ foreach ([['ROOM',(int)$req['room_id']],['INSTRUCTOR',(int)$req['instructor_id']],['SECTION',(int)$validated['offering']['section_id']] ] as $res) $ins->execute([(int)$run['id'],$entryId,$res[0],$res[1],(int)$req['day_of_week'],$slot]); } $pdo->prepare("UPDATE schedule_requests SET status='APPROVED',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int)$user['id'],$id]);$pdo->commit();}catch(Throwable $e){if($pdo->inTransaction())$pdo->rollBack();throw $e;}}else $pdo->prepare("UPDATE schedule_requests SET status='REJECTED',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int)$user['id'],$id]); respond(['ok'=>true,'data'=>['snapshot'=>bootstrap($pdo, $user)]]); }
+    if ($action === 'request_schedule') { require_auth($pdo, ['instructor']); $offeringId=input_int($input,'offering_id',1,100000000); $roomId=input_int($input,'room_id',1,100000000); $day=input_int($input,'day_of_week',1,5); $start=str_replace(':','',input_string($input,'start_time',5)); $startPeriod=strtoupper(input_string($input,'start_period',2)); $end=str_replace(':','',input_string($input,'end_time',5)); $endPeriod=strtoupper(input_string($input,'end_period',2)); $note=trim((string)($input['note']??'')); if (!preg_match('/^(0[1-9]|1[0-2])[0-5][0-9]$/',$start) || !in_array($startPeriod,['AM','PM'],true) || !preg_match('/^(0[1-9]|1[0-2])[0-5][0-9]$/',$end) || !in_array($endPeriod,['AM','PM'],true)) throw new ApiError(422,'Use valid 12-hour times in HH:MM format with AM or PM.'); $toMinutes=static function(string $value,string $period): int { $hour=(int)substr($value,0,2); $minute=(int)substr($value,2,2); if ($period==='AM' && $hour===12) $hour=0; if ($period==='PM' && $hour!==12) $hour+=12; return $hour*60+$minute; }; $startMinutes=$toMinutes($start,$startPeriod); $endMinutes=$toMinutes($end,$endPeriod); if ($endMinutes <= $startMinutes) throw new ApiError(422,'End time must be later than start time.'); $start24=sprintf('%02d:%02d', intdiv($startMinutes,60), $startMinutes%60); $termId=active_term_id($pdo); if (!$user['instructor_id']) throw new ApiError(403, 'Your account is not linked to a faculty record.'); $q=$pdo->prepare('SELECT id FROM course_offerings WHERE id=? AND term_id=? AND instructor_id=? AND status=\'ACTIVE\''); $q->execute([$offeringId,$termId,(int)$user['instructor_id']]); if(!$q->fetchColumn()) throw new ApiError(404,'Class assignment not found.'); $q=$pdo->prepare('SELECT id FROM rooms WHERE id=? AND active=1'); $q->execute([$roomId]); if(!$q->fetchColumn()) throw new ApiError(404,'Room not found.'); $slotId = input_int($input, 'slot_id', 1, 100000000, false); if ($slotId === null) { $q=$pdo->prepare('SELECT id FROM time_slots WHERE start_time=? LIMIT 1'); $q->execute([$start24]); $slotId=$q->fetchColumn(); } if (!$slotId) throw new ApiError(422,'Start time must match a configured timetable hour.'); $pdo->prepare('INSERT INTO schedule_requests(term_id,offering_id,instructor_id,room_id,day_of_week,slot_id,note) VALUES(?,?,?,?,?,?,?)')->execute([$termId,$offeringId,(int)$user['instructor_id'],$roomId,$day,(int)$slotId,$note]); audit($pdo,$user,'REQUEST_SCHEDULE','schedule_request',(int)$pdo->lastInsertId()); respond(['ok'=>true,'data'=>['snapshot'=>bootstrap($pdo,$user)]]); }
+    if ($action === 'review_schedule_request') { require_auth($pdo,['admin']); $id=input_int($input,'request_id',1,100000000); $decision=(string)($input['decision']??''); if(!in_array($decision,['APPROVE','REJECT'],true)) throw new ApiError(422,'Invalid decision.'); $q=$pdo->prepare('SELECT * FROM schedule_requests WHERE id=? AND status=\'PENDING\''); $q->execute([$id]); $req=$q->fetch(); if(!$req) throw new ApiError(404,'Request not found.'); if($decision==='APPROVE'){ $run=active_run($pdo,(int)$req['term_id']); if(!$run) throw new ApiError(409,'Generate a schedule before approving requests.'); $existingEntryIdStmt=$pdo->prepare('SELECT se.id FROM schedule_entries se JOIN schedule_runs sr ON sr.id = se.run_id WHERE se.offering_id = ? AND sr.status = \'PUBLISHED\' AND se.status = \'PUBLISHED\' ORDER BY se.id DESC LIMIT 1'); $existingEntryIdStmt->execute([(int)$req['offering_id']]); $existingEntryId = $existingEntryIdStmt->fetchColumn(); $validated=validate_manual_candidate($pdo,(int)$req['term_id'],(int)$req['offering_id'],(int)$req['room_id'],(int)$req['day_of_week'],(int)$req['slot_id'], $existingEntryId !== false ? (int) $existingEntryId : null); $pdo->beginTransaction(); try{$pdo->prepare("INSERT INTO schedule_entries(run_id,offering_id,meeting_no,room_id,day_of_week,slot_id,status) VALUES(?,?,?,?,?,?,\'PUBLISHED\')")->execute([(int)$run['id'],(int)$req['offering_id'],1,(int)$req['room_id'],(int)$req['day_of_week'],(int)$req['slot_id']]); $entryId=(int)$pdo->lastInsertId(); $ins=$pdo->prepare('INSERT INTO schedule_occupancy(run_id,entry_id,resource_type,resource_id,day_of_week,slot_id) VALUES(?,?,?,?,?,?)'); foreach($validated['candidate']['slot_ids'] as $slot){ foreach ([['ROOM',(int)$req['room_id']],['INSTRUCTOR',(int)$req['instructor_id']],['SECTION',(int)$validated['offering']['section_id']] ] as $res) $ins->execute([(int)$run['id'],$entryId,$res[0],$res[1],(int)$req['day_of_week'],$slot]); } $pdo->prepare("UPDATE schedule_requests SET status='APPROVED',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int)$user['id'],$id]);$pdo->commit();}catch(Throwable $e){if($pdo->inTransaction())$pdo->rollBack();throw $e;}}else $pdo->prepare("UPDATE schedule_requests SET status='REJECTED',reviewed_by=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int)$user['id'],$id]); respond(['ok'=>true,'data'=>['snapshot'=>bootstrap($pdo, $user)]]); }
     if ($action === 'save_schedule') {
         require_auth($pdo,['admin','scheduler']); $entryId=input_int($input,'entry_id',1,100000000); $roomId=input_int($input,'room_id',1,100000000); $day=input_int($input,'day_of_week',1,7); $slotId=input_int($input,'slot_id',1,100000000); $termId=active_term_id($pdo); if (!isset(DAY_NAMES[$day])) throw new ApiError(422, 'Schedules may only be placed Monday through Friday.');
         $stmt=$pdo->prepare("SELECT se.*, co.term_id FROM schedule_entries se JOIN schedule_runs sr ON sr.id=se.run_id AND sr.status='PUBLISHED' JOIN course_offerings co ON co.id=se.offering_id WHERE se.id=? AND se.status='PUBLISHED'"); $stmt->execute([$entryId]); $entry=$stmt->fetch(); if(!$entry || (int)$entry['term_id']!==$termId) throw new ApiError(404,'Schedule entry not found.');
@@ -1368,12 +2042,14 @@ function handle(PDO $pdo): never
 
 if (!defined('EASYSCHED_LIBRARY_MODE')) {
     try {
+        ob_clean(); // Clear any output from includes
         $requestedAction = (string) ($_GET['action'] ?? $_POST['action'] ?? 'bootstrap');
         if ($requestedAction === 'bootstrap' && empty($_SESSION['user_id'])) {
             throw new ApiError(401, 'Authentication is required.');
         }
         handle(db());
     } catch (ApiError $error) {
+        ob_clean();
         respond(['ok' => false, 'error' => $error->getMessage(), 'details' => $error->details], $error->status);
     } catch (PDOException $error) {
         // Do not expose SQL details. Convert integrity failures into an actionable
@@ -1381,9 +2057,11 @@ if (!defined('EASYSCHED_LIBRARY_MODE')) {
         error_log('EasySched database error: ' . $error->getMessage());
         $status = str_starts_with((string) $error->getCode(), '23') ? 409 : 500;
         $message = $status === 409 ? 'The change conflicts with an existing record or referenced data.' : 'The server could not complete that request.';
+        ob_clean();
         respond(['ok' => false, 'error' => $message, 'details' => []], $status);
     } catch (Throwable $error) {
-        error_log('EasySched API error: ' . $error->getMessage());
+        error_log('EasySched API error: ' . $error->getMessage() . ' in ' . $error->getFile() . ':' . $error->getLine());
+        ob_clean();
         respond(['ok' => false, 'error' => 'The server could not complete that request.'], 500);
     }
 }

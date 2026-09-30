@@ -46,7 +46,7 @@ These are seeded demonstration credentials, not production credentials. The curr
 
 1. Sign in as `admin` and show the dashboard metrics.
 2. Open **Academic setup** and explain the normalized resources: programs, sections, subjects, faculty, rooms, and course offerings.
-3. Generate the active term. The result shows assigned tasks, search nodes, soft cost, and the hard constraints checked.
+3. Generate the active term. The result shows assigned tasks, search nodes, warnings, problems, and the hard constraints checked.
 4. Open **Weekly schedule**, filter by section/instructor/room, then print or export CSV.
 5. Attempt a conflicting manual edit. The server rejects it and leaves the published entry unchanged.
 6. Sign in as `instructor` and `student` to demonstrate server-side scope restrictions. Changing an identifier in a request does not broaden either role's schedule view.
@@ -71,7 +71,7 @@ The database schema uses foreign keys, check constraints, unique keys, indexes, 
 
 The generator expands each offering into one task per required meeting. It computes every legal room/day/start-slot candidate, rejects candidates that violate hard constraints, and uses minimum-remaining-values ordering to schedule the most constrained task first. Backtracking rolls back occupancy and daily-hour state when a branch fails. Candidate costs prefer capacity fit, declared instructor times, different days for repeated meetings, and avoiding the first/last slot; correctness always takes priority. A node limit prevents runaway searches and returns diagnostics instead of publishing a partial timetable.
 
-Instructor, room, and section availability can be stored in `instructor_availability`, `room_availability`, and `section_availability`; rows marked unavailable are honored by the solver. Instructor time preferences in `instructor_time_preferences` influence candidate order but never override a hard constraint. Gap minimization and balanced daily loads are not implemented yet and should be added only after the institution agrees on weights.
+Instructor, room, and section availability can be stored in `instructor_availability`, `room_availability`, and `section_availability`; rows marked unavailable are honored by the solver. Instructor time preferences in `instructor_time_preferences` influence candidate order but never override a hard constraint. The solver compacts each section's classes into adjacent blocks using real clock time, including the lunch boundary, and prefers distributing those blocks across Monday through Friday with about four instructional hours per day. This daily load target is a preference; room, instructor, availability, and conflict constraints still take priority.
 
 ## Security notes
 

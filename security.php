@@ -1,6 +1,97 @@
 <?php
 declare(strict_types=1);
 
+function easysched_load_local_env(): void
+{
+    static $loaded = false;
+    if ($loaded) {
+        return;
+    }
+    $loaded = true;
+
+    $candidatePaths = [
+        __DIR__ . DIRECTORY_SEPARATOR . '.env',
+        __DIR__ . DIRECTORY_SEPARATOR . '.env.local',
+        __DIR__ . DIRECTORY_SEPARATOR . '.env.txt',
+    ];
+
+    foreach ($candidatePaths as $path) {
+        if (!is_file($path)) {
+            continue;
+        }
+
+        foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+            $line = trim($line);
+            if ($line === '' || str_starts_with($line, '#') || !str_contains($line, '=')) {
+                continue;
+            }
+
+            [$key, $value] = explode('=', $line, 2);
+            $key = trim($key);
+            $value = trim($value);
+
+            if ($value !== '' && (($value[0] ?? '') === '"' || ($value[0] ?? '') === "'")) {
+                $value = trim($value, "\"'");
+            }
+
+            if ($key === '') {
+                continue;
+            }
+
+            $runtimeValue = getenv($key);
+            if ($runtimeValue === false || $runtimeValue === '') {
+                putenv($key . '=' . $value);
+                $_ENV[$key] = $value;
+                $_SERVER[$key] = $value;
+            }
+        }
+
+        break;
+    }
+}
+
+function easysched_env_string(string $key): string
+{
+    easysched_load_local_env();
+
+    foreach ([
+        $_ENV[$key] ?? null,
+        $_SERVER[$key] ?? null,
+        getenv($key),
+    ] as $candidate) {
+        if (is_string($candidate)) {
+            $candidate = trim($candidate);
+            if ($candidate !== '') {
+                return $candidate;
+            }
+        }
+    }
+
+    return '';
+}
+
+function easysched_contact_email(): string
+{
+    $email = easysched_env_string('EASYSCHED_EMAIL_FROM');
+    if ($email === '') {
+        $email = easysched_env_string('EASYSCHED_CONTACT_EMAIL');
+    }
+    if ($email === '') {
+        $email = easysched_env_string('CONTACT_EMAIL');
+    }
+    if ($email === '') {
+        $email = easysched_env_string('MAIL_FROM');
+    }
+    if ($email === '') {
+        $email = easysched_env_string('EASYSCHED_SMTP_USERNAME');
+    }
+    if ($email === '') {
+        $email = 'easyscheduler1@gmail.com';
+    }
+
+    return $email;
+}
+
 function easysched_is_https(): bool
 {
     if (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {

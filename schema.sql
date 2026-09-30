@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS schedule_entries (
     room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
     day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
     slot_id INTEGER NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,
+    end_time_override TEXT,
     status TEXT NOT NULL DEFAULT 'PUBLISHED' CHECK (status IN ('PUBLISHED', 'CANCELLED')),
     UNIQUE (run_id, offering_id, meeting_no)
 );
@@ -185,8 +186,10 @@ CREATE TABLE IF NOT EXISTS schedule_requests (
     offering_id INTEGER NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
     instructor_id INTEGER NOT NULL REFERENCES instructors(id) ON DELETE RESTRICT,
     room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+    request_date TEXT,
     day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
     slot_id INTEGER NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,
+    requested_end_time TEXT,
     note TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED')),
     reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -194,6 +197,7 @@ CREATE TABLE IF NOT EXISTS schedule_requests (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_requests_status ON schedule_requests(status, created_at);
+CREATE TRIGGER IF NOT EXISTS trg_schedule_request_date_marker AFTER INSERT ON schedule_requests WHEN NEW.request_date IS NULL AND NEW.note LIKE '[REQUEST_DATE:%' BEGIN UPDATE schedule_requests SET request_date = substr(NEW.note, 15, 10) WHERE id = NEW.id; END;
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
