@@ -1,6 +1,6 @@
 # Legacy Data Migration Guide
 
-The original EasySched prototype is a browser-only application. It has no server database, so the safe migration path is an explicit export, review, and import into the normalized SQLite schema. This keeps the old files and any existing browser data intact while making the new system authoritative only after verification.
+The original EasySched prototype is a browser-only application. It has no server database, so the safe migration path is an explicit export, review, and import into the normalized PostgreSQL schema. This keeps the old files and any existing browser data intact while making the new system authoritative only after verification.
 
 ## 1. Preserve the source
 
@@ -27,11 +27,11 @@ On a fresh data directory, the first application request creates demonstration r
 
 ## 3. Staging process
 
-Use a temporary staging table or CSV review sheet. Do not insert directly into published schedule tables. The staging table below is connection-local; perform the import and validation with the same SQLite connection.
+Use a temporary staging table or CSV review sheet. Do not insert directly into published schedule tables. The staging table below is connection-local; perform the import and validation with the same PostgreSQL connection.
 
 ```sql
 CREATE TEMP TABLE legacy_offerings_stage (
-    term_year TEXT NOT NULL CHECK (term_year GLOB '20[0-9][0-9]-20[0-9][0-9]'),
+    term_year TEXT NOT NULL CHECK (term_year ~ '^20[0-9]{2}-20[0-9]{2}$'),
     semester TEXT NOT NULL CHECK (semester IN ('First Semester', 'Second Semester', 'Summer')),
     program_code TEXT NOT NULL,
     program_name TEXT NOT NULL,
@@ -44,7 +44,7 @@ CREATE TEMP TABLE legacy_offerings_stage (
     required_meetings INTEGER NOT NULL DEFAULT 1 CHECK (required_meetings BETWEEN 1 AND 20)
 );
 
--- Load reviewed CSV rows here with your SQLite import tool.
+-- Load reviewed CSV rows here with psql's \copy command.
 -- Validate counts, codes, and duplicates before the INSERT statements below.
 ```
 
@@ -121,6 +121,6 @@ Prefer regenerating schedules from validated offerings. If an approved legacy ti
 - No duplicate `(term, subject, section)` offering exists.
 - No room, instructor, or section is double-booked in the imported timetable.
 - The active term is explicitly selected after import.
-- A backup of `data/easysched.sqlite` exists before the transaction.
+- A PostgreSQL backup exists before the transaction.
 
 If every check passes, commit the transaction. If any check fails, roll back and correct the staging data. Existing database rows are never deleted as part of this migration.

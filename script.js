@@ -3,16 +3,16 @@
 
   const NAV = {
     admin: [
-      ['dashboard', 'Overview'], ['schedules', 'Schedule'], ['data', 'Academic setup'], ['room-requests', 'Room requests'], ['reports', 'Reports'], ['settings', 'Settings'], ['help', 'Help']
+      ['dashboard', 'Overview'], ['schedules', 'Schedule'], ['data', 'Academic setup'], ['room-requests', 'Room requests'], ['reports', 'Reports'], ['profile', 'Profile'], ['settings', 'Settings'], ['help', 'Help']
     ],
     scheduler: [
-      ['dashboard', 'Overview'], ['schedules', 'Schedule'], ['data', 'Academic setup'], ['reports', 'Reports'], ['settings', 'Settings'], ['help', 'Help']
+      ['dashboard', 'Overview'], ['schedules', 'Schedule'], ['data', 'Academic setup'], ['reports', 'Reports'], ['profile', 'Profile'], ['settings', 'Settings'], ['help', 'Help']
     ],
     instructor: [
-      ['dashboard', 'Overview'], ['schedules', 'My schedule'], ['room-requests', 'Room requests'], ['settings', 'Settings'], ['help', 'Help']
+      ['dashboard', 'Overview'], ['schedules', 'My schedule'], ['room-requests', 'Room requests'], ['profile', 'Profile'], ['settings', 'Settings'], ['help', 'Help']
     ],
     student: [
-      ['dashboard', 'Overview'], ['schedules', 'My section'], ['settings', 'Settings'], ['help', 'Help']
+      ['dashboard', 'Overview'], ['schedules', 'My section'], ['profile', 'Profile'], ['settings', 'Settings'], ['help', 'Help']
     ]
   };
   const PAGE_META = {
@@ -21,8 +21,24 @@
     'room-requests': ['Instructor tools', 'Room requests'],
     data: ['Master data', 'Academic records'],
     reports: ['Evidence and review', 'Validation reports'],
+    profile: ['Account', 'Profile'],
     settings: ['System controls', 'Account controls'],
     help: ['Quick orientation', 'Getting started']
+  };
+  const BASE_PATH = document.querySelector('meta[name="app-base-path"]')?.content || '';
+  const ROUTES = {
+    home: '',
+    login: 'login',
+    register: 'register',
+    'forgot-password': 'forgot-password',
+    dashboard: 'dashboard',
+    schedules: 'schedules',
+    'room-requests': 'room-requests',
+    data: 'data',
+    reports: 'reports',
+    profile: 'profile',
+    settings: 'settings',
+    help: 'help'
   };
   // Inline SVG only: the content security policy forbids external assets, and
   // font glyphs render inconsistently across the machines used for review.
@@ -51,6 +67,7 @@
     'room-requests': svgIcon(PATH.calendarCheck),
     data: svgIcon(PATH.database),
     reports: svgIcon(PATH.chart),
+    profile: svgIcon(PATH.users),
     settings: svgIcon(PATH.sliders),
     help: svgIcon(PATH.book)
   };
@@ -64,24 +81,31 @@
     'Sections covered': PATH.dashboard
   };
   const emptyState = (title, detail) => `<div class="empty-state">${svgIcon(PATH.empty, 26)}<strong>${esc(title)}</strong>${esc(detail)}</div>`;
-  const state = { snapshot: null, page: 'dashboard', dataTab: 'rooms', scheduleView: 'all', scheduleFilter: 'all', query: '' };
+  const state = { snapshot: null, page: 'dashboard', dataTab: 'subjects', scheduleView: 'all', scheduleFilter: 'all', calendarView: 'week', calendarDay: '', query: '', subjectQuery: '' };
+  const CALENDAR_LAYOUT_KEY = 'easysched-calendar-layout-v2';
+  const LEGACY_CALENDAR_LAYOUT_KEY = 'easysched-calendar-layout';
+  const calendarLayout = { timeWidth: null, dayWidths: [], rowHeights: [], columnsAdjusted: false };
+  const calendarDetailGroups = new Map();
+  let activeCalendarDetailGroup = null;
+  let calendarResize = null;
   let roomAvailabilityCheckId = 0;
   let roomAvailabilityTimer = 0;
   let availableRoomsReady = false;
   let roomRequestAllowed = false;
+  let brandPopupReturnFocus = null;
   const HELP_SLIDES = {
     admin: [
       ['Administrator orientation', 'You manage the complete EasySched workspace: users, academic data, schedule generation, reports, and security settings.', ['Start with Academic setup and review the active term before making changes.']],
       ['Maintain the academic setup', 'Create and verify programs, sections, subjects, instructors, rooms, and class assignments. These records are the inputs used by the scheduler.', ['Keep enrollment, room capacity, room type, and required features accurate.']],
-      ['Generate and publish', 'Use Generate schedule after the master data is ready. The solver validates all hard constraints before publishing a run.', ['A failed generation preserves the last published schedule.']],
+      ['Generate and publish', 'Use Auto generate for the full active-term timetable, or Manual generate to replace only offerings matching selected filters while preserving the rest.', ['A failed generation preserves the last published schedule.']],
       ['Review evidence', 'Use Reports to inspect constraint results, room utilization, and the generation record before presenting the timetable.', ['Export or print the reviewed schedule for approval.']],
       ['Manage accounts and security', 'Use Settings to change your password and administer the deployment boundary. Rotate seed credentials and use HTTPS before production use.', ['Review audit records and restrict database access.']]
     ],
     scheduler: [
       ['Scheduler orientation', 'You prepare academic records, generate schedules, and maintain the published timetable without managing user accounts.', ['Begin by checking the active term and master data.']],
       ['Prepare scheduling inputs', 'Review programs, subjects, faculty, rooms, sections, and Class assignments before generating. Each program has Years 1 through 4 with Sections A and B.', ['Incomplete or conflicting inputs can make generation impossible.']],
-      ['Generate a schedule', 'Generate schedule tests hourly room capacity, room type, features, time overlap, availability, section conflicts, and daily teaching limits before publication.', ['Never treat a partial or failed run as a published timetable.']],
-      ['Review and edit safely', 'Use the weekly schedule filters to inspect by section, instructor, or room. Manual edits are checked against the same hard constraints.', ['Regenerate when the academic inputs have materially changed.']],
+      ['Generate a schedule', 'Auto generate builds the full timetable. Manual generate lets you filter by program, section, subject, and instructor; matching offerings are replaced while the rest are preserved.', ['Both options validate room, time, availability, section, and instructor constraints before publication.']],
+      ['Review and edit safely', 'Use the weekly schedule filters to inspect by section, instructor, or room. Add a missing required meeting or edit an existing entry; both actions are checked against the same hard constraints.', ['Regenerate when the academic inputs have materially changed.']],
       ['Reports and handoff', 'Use Reports and CSV/print export to document room utilization, validation results, and the final timetable.', ['Keep the published run as the approved reference.']]
     ],
     instructor: [
@@ -104,9 +128,9 @@
     ['Know your role', 'Administrators and schedulers maintain data and generate schedules. Instructors view assigned classes. Students view their section schedule.', ['Your account controls which pages and records are available.']],
     ['Prepare the academic setup', 'Maintain the active term, four programs, 16 subjects, faculty, seven room types, sections, and Class assignments before generating.', ['Each program uses Years 1 through 4 with two sections per year.']],
     ['Create Class assignments', 'Connect a subject to a section, instructor, academic term, enrollment count, and meetings per week. These are the actual classes the scheduler places.', ['Subjects define the curriculum; Class assignments define what runs this term.']],
-    ['Generate a schedule', 'Open Schedule and choose Generate schedule. EasySched checks hourly room capacity, room type, features, time overlap, availability, and daily teaching limits.', ['A failed generation never replaces the last published schedule.']],
-    ['Review the weekly timetable', 'Use the view and filter controls to inspect schedules by section, instructor, or room. The calendar shows hourly slots and colors Lecture, Laboratory, and Other rooms differently.', ['Conflicts are rejected before publication.']],
-    ['Publish and manage changes', 'Manual edits are validated against the same conflict rules. Save only approved changes, then review the resulting timetable.', ['Keep the published run stable while testing alternatives.']],
+    ['Generate a schedule', 'Use Auto generate for the full timetable or Manual generate to select programs, sections, subjects, and instructors. Manual generation replaces matching offerings and preserves all others.', ['A failed generation never replaces the last published schedule.']],
+    ['Review the weekly timetable', 'Use the view and filter controls to inspect schedules by section, instructor, or room. Calendar blocks show their exact start and end times and span the full class duration.', ['Conflicts are rejected before publication.']],
+    ['Publish and manage changes', 'Add missing required meetings or edit existing entries; manual placements are validated against the same conflict rules before saving.', ['Keep the published run stable while testing alternatives.']],
     ['Reports and exports', 'Reports show constraint checks and room utilization. Export the visible schedule as CSV or print a clean timetable for review.', ['Apply filters before exporting when you need a focused report.']],
     ['Account security and support', 'Change your password in Settings. Use HTTPS in deployment, keep database secrets server-side, and contact an administrator when access or data needs review.', ['Return to this Help center any time from the sidebar.']]
   ];
@@ -236,10 +260,78 @@
     if (region) region.textContent = message;
   }
 
-  function showLogin(message = '') {
+  function animateView(element) {
+    element.classList.remove('view-enter');
+    requestAnimationFrame(() => element.classList.add('view-enter'));
+  }
+
+  function scrollToTop() {
+    const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+    window.scrollTo({ top: 0, left: 0, behavior });
+    $('#mainContent').scrollTo({ top: 0, left: 0, behavior });
+  }
+
+  function routeUrl(route) {
+    const segment = ROUTES[route];
+    return `${BASE_PATH}/${segment || ''}` || '/';
+  }
+
+  function setRoute(route, replace = false) {
+    const url = routeUrl(route);
+    if (window.location.pathname === url) return;
+    window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
+  }
+
+  function readRoute() {
+    let path = window.location.pathname.replace(/\/+$/, '');
+    if (BASE_PATH && (path === BASE_PATH || path.startsWith(`${BASE_PATH}/`))) {
+      path = path.slice(BASE_PATH.length);
+    }
+    const segment = path.replace(/^\/+/, '');
+    return Object.keys(ROUTES).find((route) => ROUTES[route] === segment) || 'home';
+  }
+
+  function canonicalizeHomePath() {
+    const currentPath = window.location.pathname.replace(/\/+$/, '') || '/';
+    const homePath = routeUrl('home').replace(/\/+$/, '') || '/';
+    if (currentPath !== homePath) setRoute('home', true);
+  }
+
+  function handleRouteChange() {
+    const route = readRoute();
+    if (state.snapshot) {
+      if ((NAV[role()] || []).some(([id]) => id === route)) {
+        navigate(route, false);
+      } else {
+        state.page = 'dashboard';
+        setRoute('dashboard', true);
+        showApp();
+      }
+      return;
+    }
+
+    if (route === 'home') {
+      canonicalizeHomePath();
+      showPublicHome(false);
+    } else if (route === 'login') {
+      showLogin('', false);
+    } else if (route === 'register') {
+      showRegistration(false);
+    } else if (route === 'forgot-password') {
+      showForgotPassword(false);
+    } else {
+      showLogin('', false);
+      setRoute('login', true);
+    }
+  }
+
+  function showLogin(message = '', updateRoute = true, replaceRoute = false) {
+    if (updateRoute) setRoute('login', replaceRoute);
+    document.title = 'Login | EasySched';
     registrationOpen = false;
     $('#publicHome').hidden = true;
     $('#loginView').hidden = false; $('#appView').hidden = true;
+    animateView($('#loginView'));
     $('#loginView').classList.remove('registration-mode');
     $('#registrationView').hidden = true; $('#loginForm').closest('.login-panel').hidden = false;
     $('#forgotPasswordView').hidden = true;
@@ -254,19 +346,25 @@
     showLogin();
   }
 
-  function showPublicHome() {
+  function showPublicHome(updateRoute = true) {
+    if (updateRoute) setRoute('home');
+    document.title = 'EasySched | New Sinai School and Colleges Sta. Rosa, Inc.';
     registrationOpen = false;
     $('#publicHome').hidden = false;
+    animateView($('#publicHome'));
     $('#loginView').hidden = true;
     $('#loginView').classList.remove('registration-mode');
     $('#appView').hidden = true;
-    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    scrollToTop();
   }
 
-  async function showRegistration() {
+  async function showRegistration(updateRoute = true) {
+    if (updateRoute) setRoute('register');
+    document.title = 'Student registration | EasySched';
     registrationOpen = true;
     $('#loginView').classList.add('registration-mode'); $('#loginForm').closest('.login-panel').hidden = true; $('#registrationView').hidden = false; $('#registrationError').textContent = '';
-    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    animateView($('#registrationView'));
+    scrollToTop();
     try {
       const options = await request('registration_options');
       $('#registrationProgram').innerHTML = '<option value="">Select program</option>' + options.programs.map((item) => `<option value="${esc(item.id)}">${esc(item.code)} - ${esc(item.name)}</option>`).join('');
@@ -276,11 +374,11 @@
   }
 
   async function sendRegistrationOtp() { try { const result = await request('request_registration_otp', { method: 'POST', body: { email: $('#registrationEmail').value } }); showToast('Code sent', result.message); } catch (error) { $('#registrationError').textContent = error.message; } }
-  function showForgotPassword() { registrationOpen = true; $('#loginView').classList.add('registration-mode'); $('#loginForm').closest('.login-panel').hidden = true; $('#registrationView').hidden = true; $('#forgotPasswordView').hidden = false; $('#resetError').textContent = ''; $('#resetAccount').focus(); }
+  function showForgotPassword(updateRoute = true) { if (updateRoute) setRoute('forgot-password'); document.title = 'Password recovery | EasySched'; registrationOpen = true; $('#loginView').classList.add('registration-mode'); $('#loginForm').closest('.login-panel').hidden = true; $('#registrationView').hidden = true; $('#forgotPasswordView').hidden = false; animateView($('#forgotPasswordView')); $('#resetError').textContent = ''; $('#resetAccount').focus(); }
   async function sendResetOtp() { try { const result = await request('request_password_reset', { method: 'POST', body: { account: $('#resetAccount').value } }); showToast('Check your email', result.message); } catch (error) { $('#resetError').textContent = error.message; } }
-  async function resetPassword(event) { event.preventDefault(); try { const result = await request('reset_password', { method: 'POST', body: { otp: $('#resetOtp').value, password: $('#resetPassword').value, confirm_password: $('#resetPasswordConfirm').value } }); showLogin(); showToast('Password reset', result.message); } catch (error) { $('#resetError').textContent = error.message; } }
+  async function resetPassword(event) { event.preventDefault(); try { const result = await request('reset_password', { method: 'POST', body: { otp: $('#resetOtp').value, password: $('#resetPassword').value, confirm_password: $('#resetPasswordConfirm').value } }); showLogin('', true, true); showToast('Password reset', result.message); } catch (error) { $('#resetError').textContent = error.message; } }
 
-  async function registerStudent(event) { event.preventDefault(); $('#registrationError').textContent = ''; const first = text($('#registrationFirstName').value); const middle = text($('#registrationMiddleName').value); const last = text($('#registrationLastName').value); const body = { display_name: [first, middle, last].filter(Boolean).join(' '), username: $('#registrationUsername').value, email: $('#registrationEmail').value, otp: $('#registrationOtp').value, program_id: $('#registrationProgram').value, year_level: $('#registrationYear').value, section_id: $('#registrationSection').value, password: $('#registrationPassword').value }; try { const result = await request('register', { method: 'POST', body }); showLogin(); showToast('Registration submitted', result.message, 'success'); } catch (error) { $('#registrationError').textContent = error.message; } }
+  async function registerStudent(event) { event.preventDefault(); $('#registrationError').textContent = ''; const first = text($('#registrationFirstName').value); const middle = text($('#registrationMiddleName').value); const last = text($('#registrationLastName').value); const body = { display_name: [first, middle, last].filter(Boolean).join(' '), username: $('#registrationUsername').value, email: $('#registrationEmail').value, otp: $('#registrationOtp').value, program_id: $('#registrationProgram').value, year_level: $('#registrationYear').value, section_id: $('#registrationSection').value, password: $('#registrationPassword').value }; try { const result = await request('register', { method: 'POST', body }); showLogin('', true, true); showToast('Registration submitted', result.message, 'success'); } catch (error) { $('#registrationError').textContent = error.message; } }
 
   async function reviewRegistration(id, decision) { const label = decision === 'APPROVE' ? 'approve this student registration' : 'reject this student registration'; if (!window.confirm(`Are you sure you want to ${label}?`)) return; const button = $(`.review-registration[data-registration-id="${id}"][data-decision="${decision}"]`); if (button) { button.disabled = true; button.textContent = decision === 'APPROVE' ? 'Approving...' : 'Rejecting...'; } try { const result = await request('review_registration', { method: 'POST', body: { registration_id: id, decision } }); if (result.snapshot) result.snapshot.pending_registrations = (result.snapshot.pending_registrations || []).filter((row) => Number(row.id) !== Number(id)); applySnapshot(result.snapshot); showToast('Registration reviewed', result.message); } catch (error) { if (button) { button.disabled = false; button.textContent = decision === 'APPROVE' ? 'Approve' : 'Reject'; } showToast('Could not review registration', error.message, 'error'); } }
 
@@ -303,6 +401,8 @@
   function showApp() {
     $('#publicHome').hidden = true;
     $('#loginView').hidden = true; $('#appView').hidden = false;
+    animateView($('#appView'));
+    scrollToTop();
     $('#userName').textContent = state.snapshot.user.display_name;
     $('#userRole').textContent = state.snapshot.user.role;
     $('#userAvatar').textContent = state.snapshot.user.display_name.slice(0, 2).toUpperCase();
@@ -323,13 +423,15 @@
     });
   }
 
-  function navigate(page) {
+  function navigate(page, updateRoute = true) {
     if (!(NAV[role()] || []).some(([id]) => id === page)) return;
+    if (updateRoute) setRoute(page);
     if (state.page !== page) {
       state.query = '';
       $('#globalSearch').value = '';
     }
     state.page = page;
+    $('#appView').classList.toggle('dashboard-active', page === 'dashboard');
     $$('.page').forEach((section) => { section.hidden = section.dataset.page !== page; });
     const activePage = $(`#page-${page}`);
     activePage?.classList.remove('page-enter');
@@ -339,16 +441,17 @@
     document.title = `${title} | EasySched`;
     announce(`${title} page loaded.`);
     const searchField = $('#globalSearch').closest('.search-field');
-    const searchablePage = ['schedules', 'data'].includes(page);
+    const searchablePage = ['dashboard', 'schedules', 'data'].includes(page);
     searchField.hidden = !searchablePage;
     searchField.setAttribute('aria-hidden', String(!searchablePage));
-    $('#globalSearch').setAttribute('placeholder', page === 'data' ? 'Search records' : 'Search classes');
+    $('#globalSearch').setAttribute('placeholder', page === 'data' ? 'Search records' : page === 'dashboard' ? 'Search classes, rooms, or instructors' : 'Search classes');
     closeSidebar();
     if (page === 'dashboard') renderDashboard();
     if (page === 'schedules') renderSchedules();
     if (page === 'room-requests') renderRoomRequests();
     if (page === 'data') renderData();
     if (page === 'reports') renderReports();
+    if (page === 'profile') renderProfile();
     if (page === 'settings') renderSettings();
     if (page === 'help') renderHelp();
   }
@@ -368,48 +471,132 @@
     state.snapshot = snapshot;
     if (!snapshot) return showLogin();
     if (!(NAV[snapshot.user.role] || []).some(([id]) => id === state.page)) state.page = 'dashboard';
+    setRoute(state.page, true);
     showApp();
   }
 
   function metric(label, value, note) {
     const icon = svgIcon(METRIC_ICONS[label] || PATH.dashboard, 16);
-    return `<div class="metric"><div class="metric-top"><span class="metric-icon">${icon}</span><div class="metric-label">${esc(label)}</div></div><div class="metric-value">${esc(value)}</div><div class="metric-note">${esc(note)}</div></div>`;
+    const tone = label === 'Published classes' || label === "Today's classes" ? 'blue' : label === 'Sections' ? 'violet' : label === 'Rooms' || label === 'Rooms used' ? 'orange' : 'green';
+    return `<div class="metric metric-${tone}"><div class="metric-top"><span class="metric-icon">${icon}</span><div class="metric-label">${esc(label)}</div></div><div class="metric-value">${esc(value)}</div><div class="metric-footer"><div class="metric-note">${esc(note)}</div></div></div>`;
   }
 
   function renderDashboard() {
-    const snapshot = state.snapshot; const list = schedules(); const run = snapshot.active_run; const validation = snapshot.validation;
+    const snapshot = state.snapshot; const list = schedules(); const run = snapshot.active_run;
     const activeTerm = (snapshot.terms || []).find((term) => Number(term.id) === Number(snapshot.active_term_id));
     const termLabel = activeTerm ? `${activeTerm.academic_year} · ${activeTerm.semester}` : 'No active academic term';
-    const termElement = $('#activeTermLabel'); if (termElement) termElement.textContent = `Active term: ${termLabel}`;
+    const dashboardQuickPanel = $('.dashboard-quick-panel');
+    const dashboardSidePanels = $('.dashboard-side-panels');
+    const dashboardLowerGrid = $('.dashboard-lower-grid');
+    if (dashboardQuickPanel) dashboardQuickPanel.hidden = !canManage();
+    if (dashboardSidePanels) dashboardSidePanels.hidden = !canManage();
+    if (dashboardLowerGrid) dashboardLowerGrid.classList.toggle('dashboard-without-quick-actions', !canManage());
+    const termElement = $('#activeTermLabel'); if (termElement) termElement.textContent = termLabel;
     const metricGrid = $('#metricGrid'); if (metricGrid) metricGrid.hidden = false;
-    const assigned = run ? Number(run.assigned_tasks) : 0; const total = run ? Number(run.total_tasks) : snapshot.offerings.length;
     const today = new Date().getDay(); const todayDay = today >= 1 && today <= 5 ? today : 1; const todayCount = list.filter((row) => Number(row.day_of_week) === todayDay).length;
     const metrics = canSeeGeneration()
       ? [metric('Active class assignments', snapshot.offerings.length, 'Course-section assignments'), metric('Published classes', list.length, run ? `Run #${run.id}` : 'No published run'), metric('Sections', snapshot.sections.length, 'Current academic term'), metric('Rooms', snapshot.rooms.length, 'Available resources')]
       : [metric('My classes', list.length, role() === 'student' ? 'Classes in your section' : 'Classes assigned to you'), metric("Today's classes", todayCount, 'Scheduled for today'), metric('Rooms', new Set(list.map((row) => row.room_id)).size, 'Rooms in your schedule'), metric('Next class', list[0]?.time_label || 'None', list[0] ? `${list[0].subject_code} · ${list[0].room_code}` : 'No upcoming class')];
     $('#metricGrid').innerHTML = metrics.join('');
-    $('#scheduleHealthBadge').className = `badge ${validation?.valid ? '' : run ? 'badge-warning' : 'badge-neutral'}`;
-    $('#scheduleHealthBadge').textContent = run ? (validation?.valid ? 'Validated' : 'Review required') : 'No schedule';
-    const checks = Object.entries(validation?.checks || {});
-    const healthPanel = $('#dashboardHealth')?.closest('.panel'); const runPanel = $('#runSummary')?.closest('.panel');
-    if (healthPanel) healthPanel.hidden = !canSeeGeneration(); if (runPanel) runPanel.hidden = !canSeeGeneration();
-    $('#dashboardHealth').innerHTML = checks.length ? checks.map(([item, passed]) => `<div class="health-row"><span>${esc(item.replaceAll('_', ' '))}</span><strong class="${passed ? 'health-ok' : 'health-error'}">${passed ? 'Passed' : 'Failed'}</strong></div>`).join('') : emptyState('No validation yet', 'Generate a schedule to see the hard-constraint report.');
-    $('#runSummary').innerHTML = run ? [`<div class="summary-row"><span>Run status</span><strong>${esc(run.status)}</strong></div>`, `<div class="summary-row"><span>Assigned tasks</span><strong>${assigned} / ${total}</strong></div>`, `<div class="summary-row"><span>Search nodes</span><strong>${Number(run.diagnostics?.search_nodes || 0).toLocaleString()}</strong></div>`].join('') : emptyState('No generation record', 'Run the scheduler to record diagnostics.');
-    const upcoming = list.slice(0, 6);
-    $('#upcomingBody').innerHTML = upcoming.length ? upcoming.map((row) => `<tr><td><strong>${esc(row.day_name)}</strong><span class="subline">${esc(row.time_label || row.slot_label)}</span></td><td><strong>${esc(row.subject_code)}</strong><span class="subline">${esc(row.subject_name)}</span></td><td>${esc(row.section_code)}</td><td>${esc(row.room_code)}</td><td>${esc(row.instructor_name)}</td></tr>`).join('') : `<tr><td colspan="5">${emptyState('No published schedule', 'Generate a conflict-free timetable to populate this list.')}</td></tr>`;
+    const query = state.query.trim().toLowerCase();
+    const upcoming = list.filter((row) => !query || `${row.subject_code} ${row.subject_name} ${row.section_code} ${row.program_code} ${row.room_code} ${row.instructor_name}`.toLowerCase().includes(query)).slice(0, 6);
+    const emptyTitle = query ? 'No matching classes' : 'No published schedule';
+    const emptyMessage = query ? 'Try another subject, section, room, or instructor.' : 'Generate a conflict-free timetable to populate this list.';
+    $('#upcomingBody').innerHTML = upcoming.length ? upcoming.map((row) => `<tr><td><strong>${esc(row.day_name)}</strong><span class="subline">${esc(row.time_label || row.slot_label)}</span></td><td><strong>${esc(row.subject_code)}</strong><span class="subline">${esc(row.subject_name)}</span></td><td>${esc(row.section_code)}</td><td>${esc(row.room_code)}</td><td>${esc(row.instructor_name)}</td></tr>`).join('') : `<tr><td colspan="5">${emptyState(emptyTitle, emptyMessage)}</td></tr>`;
+    const quickActions = canManage()
+      ? [
+        { page: 'schedules', addClass: true, icon: PATH.calendar, label: 'Add class' },
+        { page: 'data', tab: 'rooms', icon: PATH.building, label: 'Manage rooms' },
+        { page: 'reports', icon: PATH.chart, label: 'View reports' }
+      ]
+      : role() === 'instructor'
+        ? [
+          { page: 'schedules', icon: PATH.calendar, label: 'View my schedule' },
+          { page: 'room-requests', icon: PATH.calendarCheck, label: 'Request a room' }
+        ]
+        : [{ page: 'schedules', icon: PATH.calendar, label: 'View my section' }];
+    if (canManage()) quickActions.unshift(
+      { page: 'manual-generate', icon: PATH.sliders, label: 'Manual generate' },
+      { page: 'generate', icon: PATH.calendarCheck, label: 'Auto generate' }
+    );
+    $('#dashboardQuickActions').innerHTML = quickActions.map((action) => `<button class="dashboard-quick-action" type="button" data-navigate="${['generate', 'manual-generate'].includes(action.page) ? '' : action.page}"${action.tab ? ` data-dashboard-tab="${action.tab}"` : ''}${action.page === 'generate' ? ' data-dashboard-generate' : ''}${action.page === 'manual-generate' ? ' data-dashboard-manual-generate' : ''}${action.addClass ? ' data-dashboard-add' : ''}><span class="dashboard-quick-icon">${svgIcon(action.icon, 18)}</span><span>${esc(action.label)}</span>${svgIcon('<path d="M5 12h14M13 6l6 6-6 6"/>', 14)}</button>`).join('');
     $$('.manage-only').forEach((element) => { element.hidden = !canSeeGeneration(); });
+  }
+
+  function scheduleTypeClass(roomType) {
+    const normalized = String(roomType || '').trim().toUpperCase();
+    if (normalized === 'LAB' || normalized === 'LABORATORY') return 'lab';
+    if (normalized === 'SPECIAL' || normalized === 'OTHER') return 'other';
+    return 'lecture';
+  }
+
+  function scheduleTypeLabel(roomType) {
+    const type = scheduleTypeClass(roomType);
+    return type === 'lab' ? 'Laboratory' : type === 'other' ? 'Special' : 'Lecture';
+  }
+
+  function roomTypeBadge(roomType) {
+    const type = scheduleTypeClass(roomType);
+    return `<span class="room-type-badge ${type}">${scheduleTypeLabel(roomType)}</span>`;
   }
 
   function scheduleRow(row, includeAction = false) {
     const action = includeAction && canManage() ? `<td class="manage-column"><div class="row-actions"><button class="button button-ghost button-small edit-entry" data-entry-id="${Number(row.id)}" type="button">Edit</button><button class="button button-danger button-small cancel-entry" data-entry-id="${Number(row.id)}" type="button">Cancel</button></div></td>` : '';
-    return `<tr><td>${esc(row.day_name)}</td><td><strong>${esc(row.time_label || row.slot_label)}</strong></td><td><strong>${esc(row.subject_code)}</strong><span class="subline">${esc(row.subject_name)}</span></td><td>${esc(row.section_code)}<span class="subline">${esc(row.program_code)}</span></td><td>${esc(row.instructor_name)}</td><td>${esc(row.room_code)}<span class="subline">${Number(row.room_capacity)} seats</span></td>${action}</tr>`;
+    const roomType = row.room_type || 'LECTURE';
+    const colorClass = scheduleTypeClass(roomType);
+    return `<tr class="schedule-color-${colorClass}"><td>${esc(row.day_name)}</td><td><strong>${esc(row.time_label || row.slot_label)}</strong><span class="subline">${esc(scheduleDurationLabel(row))}</span></td><td><strong>${esc(row.subject_code)}</strong><span class="subline">${esc(row.subject_name)}${roomTypeBadge(roomType)}</span></td><td>${esc(row.section_code)}<span class="subline">${esc(row.program_code)}</span></td><td>${esc(row.instructor_name)}</td><td><strong>${esc(row.room_code)}</strong><span class="subline">${Number(row.room_capacity)} seats</span></td>${action}</tr>`;
+  }
+
+  function scheduleDurationLabel(row) {
+    const minutes = scheduleDurationMinutes(row);
+    if (minutes <= 0) return 'Duration unavailable';
+    const hours = minutes / 60;
+    const value = Number.isInteger(hours) ? String(hours) : String(Number(hours.toFixed(1)));
+    return `${value} ${hours === 1 ? 'hour' : 'hours'}`;
+  }
+
+  function scheduleDurationMinutes(row) {
+    const start = scheduleClockMinutes(row.start_time);
+    const end = scheduleClockMinutes(row.end_time);
+    return start === null || end === null ? Number(row.duration_slots || 0) * 60 : end - start;
+  }
+
+  function scheduleClockMinutes(value) {
+    const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ''));
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  }
+
+  function scheduleClockLabel(totalMinutes) {
+    const normalized = ((totalMinutes % 1440) + 1440) % 1440;
+    const hour = Math.floor(normalized / 60);
+    const minute = normalized % 60;
+    const period = hour < 12 ? 'AM' : 'PM';
+    const displayHour = hour % 12 || 12;
+    return `${displayHour}:${String(minute).padStart(2, '0')} ${period}`;
+  }
+
+  function scheduleCompactClockLabel(totalMinutes) {
+    const normalized = ((totalMinutes % 1440) + 1440) % 1440;
+    const hour = Math.floor(normalized / 60);
+    const minute = normalized % 60;
+    const period = hour < 12 ? 'AM' : 'PM';
+    const displayHour = hour % 12 || 12;
+    return `${displayHour}${minute ? `:${String(minute).padStart(2, '0')}` : ''} ${period}`;
+  }
+
+  function scheduleCompactTimeRange(startMinutes, endMinutes) {
+    const start = scheduleCompactClockLabel(startMinutes);
+    const end = scheduleCompactClockLabel(endMinutes);
+    const startPeriod = start.slice(-2);
+    const endPeriod = end.slice(-2);
+    return `${startPeriod === endPeriod ? start.slice(0, -3) : start}–${end}`;
   }
 
   function visibleScheduleRows() {
     const query = state.query.toLowerCase();
     return schedules().filter((row) => {
-      const selected = state.scheduleView === 'all' || state.scheduleFilter === 'all' || (state.scheduleView === 'section' && String(row.section_id) === state.scheduleFilter) || (state.scheduleView === 'instructor' && String(row.instructor_id) === state.scheduleFilter) || (state.scheduleView === 'room' && String(row.room_id) === state.scheduleFilter);
-      const searchable = `${row.subject_code} ${row.subject_name} ${row.section_code} ${row.instructor_name} ${row.room_code} ${row.day_name} ${row.slot_label}`.toLowerCase();
+      const selected = state.scheduleView === 'all' || state.scheduleFilter === 'all' || (state.scheduleView === 'section' && String(row.section_id) === state.scheduleFilter) || (state.scheduleView === 'instructor' && String(row.instructor_id) === state.scheduleFilter) || (state.scheduleView === 'room' && String(row.room_id) === state.scheduleFilter) || (state.scheduleView === 'room_type' && scheduleTypeClass(row.room_type) === state.scheduleFilter);
+      const searchable = `${row.subject_code} ${row.subject_name} ${row.section_code} ${row.instructor_name} ${row.room_code} ${row.room_type} ${row.day_name} ${row.slot_label}`.toLowerCase();
       return selected && (!query || searchable.includes(query));
     });
   }
@@ -417,12 +604,19 @@
   function renderSchedules() {
     const activeTerm = (state.snapshot.terms || []).find((term) => Number(term.id) === Number(state.snapshot.active_term_id));
     const termLabel = activeTerm ? `${activeTerm.academic_year} · ${activeTerm.semester}` : 'No active academic term';
+    $('.schedule-table-panel').hidden = role() === 'student';
     const scheduleTerm = $('#scheduleTermLabel'); if (scheduleTerm) scheduleTerm.textContent = `Active term: ${termLabel}`;
     const printMeta = $('#printMeta'); if (printMeta) printMeta.textContent = `Weekly class schedule · ${termLabel}`;
     renderFilterValues();
     const rows = visibleScheduleRows(); $('#scheduleCountLabel').textContent = `${rows.length} ${rows.length === 1 ? 'class' : 'classes'}`;
+    const laboratoryView = (state.scheduleView === 'room_type' && state.scheduleFilter === 'lab')
+      || (rows.length > 0 && rows.every((row) => scheduleTypeClass(row.room_type) === 'lab'));
+    $('.schedule-table-panel').classList.toggle('schedule-table-panel-lab', laboratoryView);
     const columnCount = canManage() ? 7 : 6;
-    $('#scheduleTableBody').innerHTML = rows.length ? rows.map((row) => scheduleRow(row, true)).join('') : `<tr><td colspan="${columnCount}">${emptyState('No classes match this view', 'Change the filter above, or generate a schedule.')}</td></tr>`;
+    const emptyStateClass = state.scheduleView === 'room_type' && state.scheduleFilter !== 'all'
+      ? `schedule-color-${scheduleTypeClass(state.scheduleFilter)}`
+      : '';
+    $('#scheduleTableBody').innerHTML = rows.length ? rows.map((row) => scheduleRow(row, true)).join('') : `<tr class="${emptyStateClass}"><td colspan="${columnCount}">${emptyState('No classes match this view', 'Change the filter above, or generate a schedule.')}</td></tr>`;
     const hasRun = Boolean(state.snapshot.active_run);
     const valid = Boolean(state.snapshot.validation?.valid);
     $('#conflictBadge').textContent = hasRun ? (valid ? 'Validated' : 'Conflict found') : 'No run';
@@ -502,70 +696,315 @@
     if (state.scheduleView === 'section') values = state.snapshot.sections.map((item) => [item.id, `${item.code} - ${item.program_code}`]);
     if (state.scheduleView === 'instructor') values = state.snapshot.instructors.map((item) => [item.id, item.name]);
     if (state.scheduleView === 'room') values = state.snapshot.rooms.map((item) => [item.id, item.code]);
+    if (state.scheduleView === 'room_type') values = [['lecture', 'Lecture'], ['lab', 'Laboratory'], ['other', 'Special']];
     $('#scheduleFilterValueWrap').hidden = state.scheduleView === 'all';
     select.innerHTML = `<option value="all">All</option>${values.map(([id, label]) => `<option value="${esc(id)}">${esc(label)}</option>`).join('')}`;
     select.value = values.some(([id]) => String(id) === previous) ? previous : 'all'; state.scheduleFilter = select.value;
   }
 
   function renderCalendar(rows) {
-    const columns = days();
+    calendarDetailGroups.clear();
+    const allColumns = days();
+    const dayFilter = $('#calendarDayFilter');
+    if (dayFilter) {
+      const selectedDay = String(state.calendarDay || allColumns[0]?.[0] || '');
+      dayFilter.innerHTML = allColumns.map(([day, name]) => `<option value="${esc(day)}">${esc(name)}</option>`).join('');
+      state.calendarDay = allColumns.some(([day]) => String(day) === selectedDay) ? selectedDay : String(allColumns[0]?.[0] || '');
+      dayFilter.value = state.calendarDay;
+    }
+    const columns = state.calendarView === 'day'
+      ? allColumns.filter(([day]) => String(day) === state.calendarDay)
+      : allColumns;
+    $('#calendarDayFilterWrap').hidden = state.calendarView !== 'day';
+    $('#calendarWeekView').classList.toggle('is-active', state.calendarView === 'week');
+    $('#calendarDayView').classList.toggle('is-active', state.calendarView === 'day');
+    $('#calendarWeekView').setAttribute('aria-pressed', String(state.calendarView === 'week'));
+    $('#calendarDayView').setAttribute('aria-pressed', String(state.calendarView === 'day'));
     const timeSlots = slots();
-    const slotRows = new Map(timeSlots.map((slot, index) => [String(slot.id), index + 2]));
     const dayColumns = new Map(columns.map(([day], index) => [String(day), index + 2]));
-    const byCell = new Map();
+    const slotRows = new Map(timeSlots.map((slot, index) => [String(slot.id), index]));
+    const byDay = new Map(columns.map(([day]) => [String(day), []]));
     rows.forEach((row) => {
-      const key = `${row.day_of_week}:${row.slot_id}`;
-      if (!byCell.has(key)) byCell.set(key, []);
-      byCell.get(key).push(row);
+      const startRow = slotRows.get(String(row.slot_id));
+      if (startRow === undefined) return;
+      const startTime = String(row.start_time || '').slice(0, 5);
+      const endTime = String(row.end_time || '').slice(0, 5);
+      const calculatedSpan = timeSlots.filter((slot) =>
+        String(slot.start_time).slice(0, 5) < endTime && String(slot.end_time).slice(0, 5) > startTime
+      ).length || Number(row.duration_slots) || 1;
+      const rowSpan = Math.min(Math.max(1, calculatedSpan), timeSlots.length - startRow);
+      const dayRows = byDay.get(String(row.day_of_week));
+      if (dayRows) dayRows.push({ row, startRow, rowSpan });
     });
 
     let html = '<div class="calendar-cell calendar-head calendar-row-1 calendar-column-1">Time</div>';
-    columns.forEach(([, name], index) => {
-      html += `<div class="calendar-cell calendar-head calendar-row-1 calendar-column-${index + 2}">${esc(name)}</div>`;
+    columns.forEach(([day, name], index) => {
+      const originalDayIndex = allColumns.findIndex(([allDay]) => String(allDay) === String(day));
+      html += `<div class="calendar-cell calendar-head calendar-row-1 calendar-column-${index + 2}">${esc(name)}<span class="calendar-resize calendar-resize-column" role="separator" tabindex="0" aria-orientation="vertical" aria-valuemin="150" aria-valuemax="720" aria-label="Resize ${esc(name)} column" title="Drag to resize ${esc(name)}" data-resize-axis="column" data-resize-index="${originalDayIndex + 1}"></span></div>`;
     });
     timeSlots.forEach((slot, index) => {
       const gridRow = index + 2;
-      html += `<div class="calendar-cell calendar-time calendar-row-${gridRow} calendar-column-1">${esc(slot.label)}</div>`;
+      html += `<div class="calendar-cell calendar-time calendar-row-${gridRow} calendar-column-1">${esc(slot.label)}<span class="calendar-resize calendar-resize-row" role="separator" tabindex="0" aria-orientation="horizontal" aria-valuemin="56" aria-valuemax="240" aria-label="Resize row after ${esc(slot.label)}" title="Drag to resize this time slot" data-resize-axis="row" data-resize-index="${index}"></span></div>`;
       columns.forEach((_, dayIndex) => {
         html += `<div class="calendar-cell calendar-row-${gridRow} calendar-column-${dayIndex + 2}"></div>`;
       });
     });
 
-    byCell.forEach((entries, key) => {
-      const [day, slotId] = key.split(':');
-      const gridRow = slotRows.get(slotId);
+    byDay.forEach((dayRows, day) => {
+      if (!dayRows.length) return;
+      dayRows.sort((left, right) => left.startRow - right.startRow
+        || String(left.row.subject_code || '').localeCompare(String(right.row.subject_code || ''))
+        || String(left.row.section_code || '').localeCompare(String(right.row.section_code || '')));
       const gridColumn = dayColumns.get(day);
-      if (!gridRow || !gridColumn) return;
-      const cards = entries.map((row) => {
-        const subject = subjectById(row.subject_id);
-        const roomType = row.room_type || subject?.room_type || 'LECTURE';
-        const eventClass = roomType === 'LAB' ? 'lab' : roomType === 'SPECIAL' ? 'other' : 'lecture';
-        return `<div class="calendar-event ${eventClass}" title="${esc(`${row.subject_code} | ${row.time_label} | ${row.section_code} | ${row.room_code}`)}"><strong>${esc(row.subject_code)}</strong><span>${esc(row.time_label)}</span><span>${esc(row.section_code)} · ${esc(row.room_code)}</span><span>${esc(row.instructor_name)}</span></div>`;
+      if (!gridColumn) return;
+      const groups = state.calendarView === 'day'
+        ? dayRows.map((entry) => ({ startRow: entry.startRow, entries: [entry], rowSpan: entry.rowSpan }))
+        : (() => {
+        const overlapGroups = [];
+          dayRows.forEach((entry) => {
+          const previous = overlapGroups[overlapGroups.length - 1];
+          const entryEnd = entry.startRow + entry.rowSpan;
+          if (!previous || entry.startRow >= previous.endRow) {
+            overlapGroups.push({ startRow: entry.startRow, endRow: entryEnd, entries: [entry] });
+            return;
+          }
+          previous.entries.push(entry);
+          previous.endRow = Math.max(previous.endRow, entryEnd);
+        });
+        return overlapGroups.map((group) => ({
+          startRow: group.startRow,
+          entries: group.entries,
+          rowSpan: group.endRow - group.startRow
+        }));
+      })();
+      const laneEnds = [];
+      const dayEvents = groups.map(({ entries, startRow, rowSpan }) => {
+        let lane = laneEnds.findIndex((laneEnd) => laneEnd <= startRow);
+        if (lane === -1) {
+          lane = laneEnds.length;
+          laneEnds.push(startRow + rowSpan);
+        } else {
+          laneEnds[lane] = startRow + rowSpan;
+        }
+        if (entries.length === 1) {
+          const row = entries[0].row;
+          const subject = subjectById(row.subject_id);
+          const roomType = row.room_type || subject?.room_type || 'LECTURE';
+          const eventClass = scheduleTypeClass(roomType);
+          const timeLabel = row.time_label || row.slot_label;
+          const duration = scheduleDurationLabel(row);
+          const title = `${row.subject_code} | ${row.section_code} | ${row.room_code} | ${row.instructor_name} | ${timeLabel} | ${duration}`;
+          return `<article class="calendar-event ${eventClass} calendar-event-start-${startRow + 1} calendar-event-span-${rowSpan} calendar-event-lane-${lane + 1}${rowSpan > 1 ? ' calendar-event-long' : ''}" aria-label="${esc(title)}" title="${esc(title)}"><span class="calendar-event-time">${esc(timeLabel)}</span><strong>${esc(row.subject_code)}</strong><span>${esc(row.section_code)} · ${esc(row.room_code)}</span><span class="calendar-event-instructor">${esc(row.instructor_name)}</span></article>`;
+        }
+        const startLabel = timeSlots[startRow]?.label || entries[0].row.time_label || entries[0].row.slot_label;
+        const startMinutes = entries.map(({ row }) => scheduleClockMinutes(row.start_time)).filter((value) => value !== null);
+        const endMinutes = entries.map(({ row }) => scheduleClockMinutes(row.end_time)).filter((value) => value !== null);
+        const timeRange = startMinutes.length && endMinutes.length
+          ? `${scheduleClockLabel(Math.min(...startMinutes))} - ${scheduleClockLabel(Math.max(...endMinutes))}`
+          : startLabel;
+        const label = `${entries.length} classes scheduled ${timeRange}`;
+        const detailId = String(calendarDetailGroups.size);
+        calendarDetailGroups.set(detailId, { entries, day: allColumns.find(([dayId]) => String(dayId) === String(day))?.[1] || '', timeRange });
+        const groupsByDuration = new Map();
+        entries.forEach((entry) => {
+          const durationGroup = groupsByDuration.get(entry.rowSpan) || [];
+          durationGroup.push(entry.row);
+          groupsByDuration.set(entry.rowSpan, durationGroup);
+        });
+        const durationSummary = [...groupsByDuration.entries()]
+          .sort(([left], [right]) => left - right)
+          .map(([span, durationRows]) => {
+            const durationStarts = durationRows.map((row) => scheduleClockMinutes(row.start_time)).filter((value) => value !== null);
+            const durationEnds = durationRows.map((row) => scheduleClockMinutes(row.end_time)).filter((value) => value !== null);
+            const start = durationStarts.length ? Math.min(...durationStarts) : scheduleClockMinutes(timeSlots[startRow]?.start_time) || 0;
+            const end = durationEnds.length ? Math.max(...durationEnds) : start;
+            const range = scheduleCompactTimeRange(start, end);
+            const noun = durationRows.length === 1 ? 'class' : 'classes';
+            return `<span class="calendar-overlap-duration"><strong>${durationRows.length}</strong> ${noun} · ${esc(range)}</span>`;
+          }).join('');
+        return `<button class="calendar-event calendar-overlap calendar-event-start-${startRow + 1} calendar-event-span-${rowSpan} calendar-event-lane-${lane + 1}" type="button" data-calendar-detail-id="${detailId}" aria-label="${esc(label)}" title="Show all ${entries.length} classes scheduled ${esc(timeRange)}"><strong>${entries.length} ${entries.length === 1 ? 'class' : 'classes'}</strong><span class="calendar-overlap-breakdown">${durationSummary}</span><span class="calendar-overlap-action">Select to view all details</span></button>`;
       }).join('');
-      const stackDensity = entries.length === 1 ? 'calendar-stack-single' : 'calendar-stack-multiple';
-      html += `<div class="calendar-event-stack ${stackDensity} calendar-row-${gridRow} calendar-column-${gridColumn} calendar-span-1">${cards}</div>`;
+      html += `<div class="calendar-day-events calendar-column-${gridColumn} calendar-day-events-lanes-${Math.min(laneEnds.length, 12)}">${dayEvents}</div>`;
     });
 
-    $('#calendarGrid').innerHTML = html;
+    const calendar = $('#calendarGrid');
+    calendar.classList.toggle('calendar-grid-day', state.calendarView === 'day');
+    calendar.innerHTML = html;
+    initializeCalendarLayout(allColumns.length, timeSlots.length);
+    applyCalendarLayout(calendar);
+    resizeDefaultCalendarLayout();
+  }
+
+  function initializeCalendarLayout(dayCount, rowCount) {
+    if (calendarLayout.timeWidth === null) {
+      const compact = window.matchMedia('(max-width: 620px)').matches;
+      const timeWidth = compact ? 92 : 144;
+      const calendarWidth = $('#calendarGrid').clientWidth;
+      const dayWidth = Math.max(150, Math.min(480, Math.floor((calendarWidth - timeWidth) / dayCount)));
+      let saved = null;
+      let legacy = null;
+      try {
+        saved = JSON.parse(window.localStorage.getItem(CALENDAR_LAYOUT_KEY) || 'null');
+        legacy = JSON.parse(window.localStorage.getItem(LEGACY_CALENDAR_LAYOUT_KEY) || 'null');
+      } catch { saved = null; legacy = null; }
+      const validSize = (value, min, max) => Number.isFinite(Number(value)) && Number(value) >= min && Number(value) <= max;
+      calendarLayout.timeWidth = validSize(saved?.timeWidth, 80, 300) ? Number(saved.timeWidth) : timeWidth;
+      calendarLayout.columnsAdjusted = saved?.columnsAdjusted === true;
+      calendarLayout.dayWidths = Array.from({ length: dayCount }, (_, index) =>
+        validSize(saved?.dayWidths?.[index], 100, 720) ? Number(saved.dayWidths[index]) : dayWidth);
+      calendarLayout.rowHeights = Array.from({ length: rowCount }, (_, index) =>
+        validSize(saved?.rowHeights?.[index] ?? legacy?.rowHeights?.[index], 56, 240)
+          ? Number(saved?.rowHeights?.[index] ?? legacy.rowHeights[index]) : 82);
+      return;
+    }
+    calendarLayout.dayWidths = Array.from({ length: dayCount }, (_, index) => Math.max(100, Math.min(720, calendarLayout.dayWidths[index] || 100)));
+    calendarLayout.rowHeights = Array.from({ length: rowCount }, (_, index) => calendarLayout.rowHeights[index] || 82);
+  }
+
+  function applyCalendarLayout(calendar = $('#calendarGrid')) {
+    if (!calendar || calendarLayout.timeWidth === null) return;
+    const allColumns = days();
+    const visibleIndexes = state.calendarView === 'day'
+      ? [allColumns.findIndex(([day]) => String(day) === state.calendarDay)].filter((index) => index >= 0)
+      : allColumns.map((_, index) => index);
+    calendar.style.width = '100%';
+    calendar.style.gridTemplateColumns = state.calendarView === 'day'
+      ? `${calendarLayout.timeWidth}px minmax(0, 1fr)`
+      : `${calendarLayout.timeWidth}px ${visibleIndexes.map((index) => `${calendarLayout.dayWidths[index]}px`).join(' ')}`;
+    calendar.style.gridTemplateRows = `40px ${calendarLayout.rowHeights.map((height) => `minmax(${height}px, auto)`).join(' ')}`;
+    $$('.calendar-resize-column', calendar).forEach((handle) => {
+      const width = calendarLayout.dayWidths[Number(handle.dataset.resizeIndex) - 1];
+      handle.setAttribute('aria-valuenow', String(width));
+    });
+    $$('.calendar-resize-row', calendar).forEach((handle) => {
+      const height = calendarLayout.rowHeights[Number(handle.dataset.resizeIndex)];
+      handle.setAttribute('aria-valuenow', String(height));
+    });
+  }
+
+  function resizeDefaultCalendarLayout() {
+    if (calendarLayout.timeWidth === null) return;
+    const calendar = $('#calendarGrid');
+    if (!calendar) return;
+    if (calendarLayout.columnsAdjusted) return;
+    const visibleIndexes = state.calendarView === 'day'
+      ? [days().findIndex(([day]) => String(day) === state.calendarDay)].filter((index) => index >= 0)
+      : days().map((_, index) => index);
+    const availableWidth = calendar.parentElement.clientWidth - calendarLayout.timeWidth - 8;
+    const width = Math.max(100, Math.floor(availableWidth / visibleIndexes.length));
+    visibleIndexes.forEach((index) => { calendarLayout.dayWidths[index] = width; });
+    applyCalendarLayout(calendar);
+  }
+
+  function saveCalendarLayout() {
+    try {
+      window.localStorage.setItem(CALENDAR_LAYOUT_KEY, JSON.stringify(calendarLayout));
+    } catch {
+      announce('The timetable size was adjusted but could not be saved in this browser.');
+    }
+  }
+
+  function resizeCalendarHandle(handle, delta) {
+    const index = Number(handle.dataset.resizeIndex);
+    if (handle.dataset.resizeAxis === 'column') {
+      const width = calendarLayout.dayWidths[index - 1];
+      calendarLayout.dayWidths[index - 1] = Math.max(100, Math.min(720, width + delta));
+      calendarLayout.columnsAdjusted = true;
+    } else {
+      const height = calendarLayout.rowHeights[index];
+      calendarLayout.rowHeights[index] = Math.max(56, Math.min(240, height + delta));
+    }
+    applyCalendarLayout();
+  }
+
+  function beginCalendarResize(event) {
+    const handle = event.target.closest('.calendar-resize');
+    if (!handle) return;
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    calendarResize = {
+      handle,
+      pointerId: event.pointerId,
+      axis: handle.dataset.resizeAxis,
+      start: handle.dataset.resizeAxis === 'column' ? event.clientX : event.clientY,
+      initial: handle.dataset.resizeAxis === 'column'
+        ? calendarLayout.dayWidths[Number(handle.dataset.resizeIndex) - 1]
+        : calendarLayout.rowHeights[Number(handle.dataset.resizeIndex)]
+    };
+  }
+
+  function moveCalendarResize(event) {
+    if (!calendarResize || event.pointerId !== calendarResize.pointerId) return;
+    const coordinate = calendarResize.axis === 'column' ? event.clientX : event.clientY;
+    const delta = coordinate - calendarResize.start;
+    const index = Number(calendarResize.handle.dataset.resizeIndex);
+    if (calendarResize.axis === 'column') {
+      calendarLayout.dayWidths[index - 1] = Math.max(100, Math.min(720, calendarResize.initial + delta));
+      calendarLayout.columnsAdjusted = true;
+    } else {
+      calendarLayout.rowHeights[index] = Math.max(56, Math.min(240, calendarResize.initial + delta));
+    }
+    applyCalendarLayout();
+  }
+
+  function endCalendarResize(event) {
+    if (!calendarResize || event.pointerId !== calendarResize.pointerId) return;
+    calendarResize = null;
+    saveCalendarLayout();
+  }
+
+  function keyboardResizeCalendar(event) {
+    const handle = event.target.closest('.calendar-resize');
+    if (!handle) return;
+    const keys = handle.dataset.resizeAxis === 'column' ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+    if (!keys.includes(event.key)) return;
+    event.preventDefault();
+    const delta = event.key === keys[0] ? -8 : 8;
+    resizeCalendarHandle(handle, delta);
+    saveCalendarLayout();
   }
 
   const DATA_META = {
     rooms: { title: 'Rooms', singular: 'Room', headers: ['Code', 'Name', 'Capacity', 'Type', 'Features'], row: (item) => [item.code, item.name, `${item.capacity} seats`, item.room_type, (item.features || []).join(', ')], fields: roomFields },
     instructors: { title: 'Faculty', singular: 'Faculty member', headers: ['Employee no.', 'Name', 'Email', 'Max hours/day'], row: (item) => [item.employee_no, item.name, item.email || '-', `${item.max_hours_day} hours`], fields: instructorFields },
-    subjects: { title: 'Subjects', singular: 'Subject', headers: ['Code', 'Name', 'Hours/week', 'Duration', 'Room type'], row: (item) => [item.code, item.name, `${item.hours_per_week} hours`, `${item.duration_slots} slot(s)`, item.room_type], fields: subjectFields },
+    subjects: { title: 'Subject & Course Code', singular: 'Subject', headers: ['Course Code', 'Subject Name'], row: (item) => [item.code, item.name], fields: subjectFields },
     programs: { title: 'Programs', singular: 'Program', headers: ['Code', 'Program name'], row: (item) => [item.code, item.name], fields: programFields },
     sections: { title: 'Sections', singular: 'Section', headers: ['Code', 'Program', 'Year', 'Students'], row: (item) => [item.code, item.program_code, `Year ${item.year_level}`, item.student_count], fields: sectionFields },
-    offerings: { title: 'Class assignments', singular: 'Class assignment', headers: ['Subject', 'Section', 'Instructor', 'Enrollment', 'Meetings'], row: (item) => [item.subject_name, item.section_code, item.instructor_name, item.enrollment, item.required_meetings], fields: offeringFields },
-    users: { title: 'Users', singular: 'User', headers: ['Username', 'Display name', 'Role', 'Assignment'], row: (item) => [item.username, item.display_name, item.role, item.instructor_name || item.section_code || '-'], fields: userFields }
+    offerings: { title: 'Class assignments', singular: 'Class assignment', headers: ['Subject', 'Section', 'Instructor', 'Enrollment', 'Meetings'], row: (item) => [`${item.subject_code} · ${item.subject_name}`, item.section_code, item.instructor_name, item.enrollment, item.required_meetings], fields: offeringFields },
+    users: { title: 'Users', singular: 'User', headers: ['Username', 'Display name', 'Email', 'Role', 'Assignment'], row: (item) => [item.username, item.display_name, item.email || '-', item.role, item.instructor_name || item.section_code || '-'], fields: userFields }
   };
 
   function renderData() {
     if (state.dataTab === 'users' && !canAdmin()) state.dataTab = 'rooms';
-    const meta = DATA_META[state.dataTab]; $('#dataTabTitle').textContent = meta.title; $('#dataTableHead').innerHTML = `<tr>${meta.headers.map((header) => `<th>${esc(header)}</th>`).join('')}<th class="manage-column">Action</th></tr>`;
+    const isSubjectCatalog = state.dataTab === 'subjects';
+    const meta = DATA_META[state.dataTab];
+    $('#dataTabTitle').textContent = meta.title;
+    $('#dataTabEyebrow').textContent = isSubjectCatalog ? 'Subject & course management' : 'Current term records';
+    $('#subjectManagementTools').hidden = !isSubjectCatalog;
+    $('#offeringImportPanel').hidden = state.dataTab !== 'offerings' || !canAdmin();
+    $('#addRecordButton').textContent = isSubjectCatalog ? '+ Add Subject' : 'Add record';
+    if (state.page === 'data') {
+      const globalSearch = $('#globalSearch').closest('.search-field');
+      globalSearch.hidden = isSubjectCatalog;
+      globalSearch.setAttribute('aria-hidden', String(isSubjectCatalog));
+    }
+    $('#dataTableHead').innerHTML = `<tr>${meta.headers.map((header) => `<th>${esc(header)}</th>`).join('')}<th class="manage-column">${isSubjectCatalog ? 'Actions' : 'Action'}</th></tr>`;
     $$('.tab-button').forEach((button) => { const active = button.dataset.dataTab === state.dataTab; button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active)); });
-    const query = state.query.toLowerCase();
-    const source = (state.snapshot[state.dataTab] || []).filter((item) => !query || Object.values(item).some((value) => String(value ?? '').toLowerCase().includes(query)));
-    $('#dataTableBody').innerHTML = source.length ? source.map((item) => `<tr>${meta.row(item).map((cell) => `<td>${esc(cell)}</td>`).join('')}<td class="manage-column"><div class="row-actions"><button class="button button-ghost button-small edit-record" data-entity="${state.dataTab}" data-record-id="${Number(item.id || 0)}" type="button">Edit</button><button class="button button-danger button-small delete-record" data-entity="${state.dataTab}" data-record-id="${Number(item.id || 0)}" type="button">Delete</button></div></td></tr>`).join('') : `<tr><td colspan="${meta.headers.length + 1}">${emptyState(query ? 'No matching records' : `No ${meta.title.toLowerCase()} yet`, query ? 'Try a different search term.' : 'Use “Add record” to create the first one.')}</td></tr>`;
+    const query = (isSubjectCatalog ? state.subjectQuery : state.query).trim().toLowerCase();
+    const source = (state.snapshot[state.dataTab] || [])
+      .filter((item) => !query || (isSubjectCatalog
+        ? `${item.code} ${item.name}`.toLowerCase().includes(query)
+        : Object.values(item).some((value) => String(value ?? '').toLowerCase().includes(query))))
+      .sort(isSubjectCatalog ? (left, right) => left.code.localeCompare(right.code) || left.name.localeCompare(right.name) : () => 0);
+    if (isSubjectCatalog) $('#subjectResultCount').textContent = `${source.length} subject${source.length === 1 ? '' : 's'}`;
+    const emptyTitle = query ? 'No matching records' : `No ${meta.title.toLowerCase()} yet`;
+    const emptyMessage = query ? 'Try a different search term.' : isSubjectCatalog ? 'Add a course code and subject name to build the catalog.' : 'Use “Add record” to create the first one.';
+    $('#dataTableBody').innerHTML = source.length ? source.map((item) => {
+      const cells = isSubjectCatalog
+        ? `<td>${esc(item.code)}</td><td>${esc(item.name)}${roomTypeBadge(item.room_type)}</td>`
+        : meta.row(item).map((cell) => `<td>${esc(cell)}</td>`).join('');
+      return `<tr>${cells}<td class="manage-column"><div class="row-actions"><button class="button button-ghost button-small edit-record" data-entity="${state.dataTab}" data-record-id="${Number(item.id || 0)}" type="button">Edit</button><button class="button button-danger button-small delete-record" data-entity="${state.dataTab}" data-record-id="${Number(item.id || 0)}" type="button">Delete</button></div></td></tr>`;
+    }).join('') : `<tr><td colspan="${meta.headers.length + 1}">${emptyState(emptyTitle, emptyMessage)}</td></tr>`;
     $$('.manage-column').forEach((cell) => { cell.hidden = !canManage(); });
     renderPendingRegistrations();
   }
@@ -637,20 +1076,95 @@
     $$('#roomReport .bar-fill').forEach((bar) => { bar.style.width = `${bar.dataset.fill}%`; });
   }
 
+  function profileSectionMarkup(section, fields, profile) {
+    const values = fields.map(([key, label, type, required]) => `<div class="profile-value"><dt>${esc(label)}${required ? ' <span class="required-mark">*</span>' : ''}</dt><dd>${text(profile[key]) ? esc(profile[key]) : '<span class="profile-missing">Not provided</span>'}</dd></div>`).join('');
+    const controls = fields.map(([key, label, type, required, maxLength, options = []]) => {
+      const id = `profile-${key}`;
+      const requiredAttribute = required ? 'required' : '';
+      const control = type === 'select'
+        ? `<select id="${id}" name="${key}" ${requiredAttribute}><option value="">Choose</option>${options.map((option) => `<option value="${esc(option)}" ${profile[key] === option ? 'selected' : ''}>${esc(option)}</option>`).join('')}</select>`
+        : `<input id="${id}" name="${key}" type="${type}" value="${esc(profile[key] || '')}" maxlength="${maxLength}" ${requiredAttribute}>`;
+      return `<div class="field"><label for="${id}">${esc(label)}${required ? ' <span class="required-mark">*</span>' : ''}</label>${control}</div>`;
+    }).join('');
+    return `<dl class="profile-values">${values}</dl><form class="profile-editor" data-profile-form="${section}" method="post" hidden><div class="profile-form-grid">${controls}</div><div class="profile-actions"><button class="button button-primary button-small" type="submit">Save changes</button><button class="button button-ghost button-small" type="button" data-profile-cancel="${section}">Cancel</button></div></form>`;
+  }
+
+  function renderProfile() {
+    const profile = state.snapshot.student_profile || {};
+    $('#profileBasicsContent').innerHTML = profileSectionMarkup('basics', [
+      ['sex', 'Sex', 'select', true, 20, ['Male', 'Female', 'Other', 'Prefer not to say']],
+      ['birthdate', 'Birthdate', 'date', true, 10],
+      ['mobile_number', 'Mobile number', 'tel', true, 24],
+      ['guardian_first_name', 'Primary guardian first name', 'text', true, 80],
+      ['guardian_middle_name', 'Primary guardian middle name', 'text', false, 80],
+      ['guardian_last_name', 'Primary guardian last name', 'text', true, 80],
+      ['guardian_email', 'Primary guardian email address', 'email', true, 254],
+      ['guardian_contact_number', 'Primary guardian contact number', 'tel', true, 24],
+      ['guardian_relation', 'Relation to student', 'text', true, 60]
+    ], profile);
+    $('#profileAddressContent').innerHTML = profileSectionMarkup('address', [
+      ['block_lot', 'Block/Lot/No/Village/Subdivision', 'text', true, 120],
+      ['street_name', 'Street name', 'text', false, 120],
+      ['barangay', 'Barangay', 'text', true, 120],
+      ['city_municipality', 'City / Municipality', 'text', true, 120],
+      ['province', 'Province', 'text', true, 120],
+      ['zip_code', 'ZIP code', 'text', false, 12]
+    ], profile);
+    $('#profileParentsContent').innerHTML = profileSectionMarkup('parents', [
+      ['father_last_name', 'Father last name', 'text', true, 80],
+      ['father_first_name', 'Father first name', 'text', true, 80],
+      ['father_middle_name', 'Father middle name', 'text', false, 80],
+      ['mother_last_name', 'Mother last name (maiden name)', 'text', true, 80],
+      ['mother_first_name', 'Mother first name', 'text', true, 80],
+      ['mother_middle_name', 'Mother middle name', 'text', false, 80]
+    ], profile);
+    $('#profileVerified').checked = Boolean(profile.verified_at);
+    $('#profileVerificationStatus').textContent = profile.verified_at ? 'Information verified' : '';
+    ['basics', 'address', 'parents'].forEach((section) => setProfileSectionEditing(section, false));
+  }
+
+  function setProfileSectionEditing(section, editing) {
+    const panel = $(`[data-profile-section="${section}"]`);
+    if (!panel) return;
+    panel.querySelector('.profile-values').hidden = editing;
+    panel.querySelector('[data-profile-form]').hidden = !editing;
+    panel.querySelector('[data-profile-edit]').hidden = editing;
+    if (editing) panel.querySelector('input, select')?.focus();
+  }
+
   function renderSettings() {
-    const terms = state.snapshot.terms; const active = terms.find((term) => Number(term.id) === Number(state.snapshot.active_term_id)) || terms[0]; if (active) { $('#academicYear').value = active.academic_year; $('#semester').value = active.semester; } $('#settingsForm').closest('.panel').hidden = !canAdmin();
+    const terms = state.snapshot.terms; const active = terms.find((term) => Number(term.id) === Number(state.snapshot.active_term_id)) || terms[0]; if (active) { $('#academicYear').value = active.academic_year; $('#semester').value = active.semester; } $('#settingsForm').closest('.panel').hidden = !canAdmin(); $('#accountEmailValue').textContent = state.snapshot.user.email || 'Not provided';
   }
 
   function renderAll() { buildNavigation(); $$('.manage-only').forEach((element) => { element.hidden = !canManage(); }); $$('.admin-only').forEach((element) => { element.hidden = !canAdmin(); }); navigate(state.page); }
 
   const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+  function resetModalControls() {
+    $('#modalCloseButton').disabled = false;
+    $('#modalCancelButton').disabled = false;
+    const submit = $('.modal-footer button[type="submit"]');
+    submit.disabled = false;
+    submit.textContent = 'Save';
+  }
+
   function openModal(title, fields, mode, record = {}) {
     modalMode = mode; modalRecord = record;
     modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    resetModalControls();
+    $('#modal').classList.remove('modal-calendar-details', 'modal-generation');
     $('#modalTitle').textContent = title;
-    $('#modalEyebrow').textContent = mode.startsWith('edit') ? 'Update record' : 'New record';
+    $('#modalEyebrow').textContent = mode === 'manual-generate' ? 'Filtered generation' : mode.startsWith('edit') ? 'Update record' : 'New record';
+    if (mode === 'manual-generate') {
+      $('#modal').classList.add('modal-generation');
+      $('.modal-footer button[type="submit"]').textContent = 'Generate selected';
+    } else {
+      $('.modal-footer button[type="submit"]').textContent = 'Save';
+    }
+    $('#modalForm').hidden = false;
+    $('.modal-footer').hidden = false;
     $('#modalBody').innerHTML = `<div class="form-grid">${fields(record).join('')}</div>`;
+    updateUserAssignmentFields();
     $('#modalBackdrop').hidden = false;
     document.body.classList.add('modal-open');
     // Land on the first field rather than the close button: reviewers fill these
@@ -661,40 +1175,374 @@
     announce(`${title} dialog opened.`);
   }
 
+  function openCalendarDetails(detailId) {
+    const group = calendarDetailGroups.get(detailId);
+    if (!group) return;
+    activeCalendarDetailGroup = group;
+    modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    modalMode = 'calendar-details';
+    modalRecord = null;
+    $('#modal').classList.add('modal-calendar-details');
+    $('#modalTitle').textContent = `${group.day} · ${group.timeRange}`;
+    $('#modalEyebrow').textContent = `${group.entries.length} scheduled classes`;
+    $('#modalForm').hidden = false;
+    $('.modal-footer').hidden = true;
+    const filterOptions = (key, label) => {
+      const values = [...new Set(group.entries.map(({ row }) => String(row[key] || '').trim()).filter(Boolean))]
+        .sort((left, right) => left.localeCompare(right));
+      return `<label class="schedule-detail-filter">${esc(label)}<select data-schedule-detail-filter="${esc(key)}"><option value="">All ${esc(label.toLowerCase())}</option>${values.map((value) => `<option value="${esc(value)}">${esc(value)}</option>`).join('')}</select></label>`;
+    };
+    $('#modalBody').innerHTML = `<div class="schedule-detail-filters"><label class="schedule-detail-search">Search this time slot<input type="search" data-schedule-detail-search placeholder="Subject, section, instructor, or room" autocomplete="off"></label>${filterOptions('section_code', 'Section')}${filterOptions('instructor_name', 'Instructor')}${filterOptions('room_code', 'Room')}</div><p class="schedule-detail-result-count" data-schedule-detail-count aria-live="polite"></p><div class="schedule-detail-list" data-schedule-detail-list></div>`;
+    renderCalendarDetailResults();
+    $('#modalBackdrop').hidden = false;
+    document.body.classList.add('modal-open');
+    $('#modalCloseButton').focus();
+    announce(`${group.entries.length} scheduled class details opened.`);
+  }
+
+  function renderCalendarDetailResults() {
+    const group = activeCalendarDetailGroup;
+    const list = $('[data-schedule-detail-list]', $('#modalBody'));
+    if (!group || !list) return;
+    const query = text($('[data-schedule-detail-search]', $('#modalBody'))?.value).toLowerCase();
+    const selectedSection = text($('[data-schedule-detail-filter="section_code"]', $('#modalBody'))?.value);
+    const selectedInstructor = text($('[data-schedule-detail-filter="instructor_name"]', $('#modalBody'))?.value);
+    const selectedRoom = text($('[data-schedule-detail-filter="room_code"]', $('#modalBody'))?.value);
+    const matches = group.entries.filter(({ row }) => {
+      const subject = subjectById(row.subject_id);
+      const searchable = `${row.subject_code} ${row.subject_name || subject?.name || ''} ${row.section_code} ${row.program_code || ''} ${row.instructor_name} ${row.room_code}`.toLowerCase();
+      return (!query || searchable.includes(query))
+        && (!selectedSection || String(row.section_code) === selectedSection)
+        && (!selectedInstructor || String(row.instructor_name) === selectedInstructor)
+        && (!selectedRoom || String(row.room_code) === selectedRoom);
+    });
+    const count = $('[data-schedule-detail-count]', $('#modalBody'));
+    if (count) count.textContent = `Showing ${matches.length} of ${group.entries.length} classes`;
+    list.innerHTML = matches.length ? matches.map(({ row }) => {
+      const subject = subjectById(row.subject_id);
+      const roomType = row.room_type || subject?.room_type || 'LECTURE';
+      const type = scheduleTypeClass(roomType);
+      return `<article class="schedule-detail-card schedule-color-${type}"><div class="schedule-detail-heading"><strong>${esc(row.subject_code)}</strong><span>${esc(row.time_label || row.slot_label)} · ${esc(scheduleDurationLabel(row))}</span></div><p>${esc(row.subject_name || subject?.name || '')}${roomTypeBadge(roomType)}</p><dl><div><dt>Section</dt><dd>${esc(row.section_code)}${row.program_code ? ` · ${esc(row.program_code)}` : ''}</dd></div><div><dt>Instructor</dt><dd>${esc(row.instructor_name)}</dd></div><div><dt>Room</dt><dd>${esc(row.room_code)}${row.room_capacity ? ` · ${Number(row.room_capacity)} seats` : ''}</dd></div></dl></article>`;
+    }).join('') : '<p class="schedule-detail-empty">No classes match these filters. Try changing or clearing a filter.</p>';
+  }
+
   /* Tab must not escape an open dialog, otherwise focus walks into the page
    * behind the backdrop where nothing is clickable. */
-  function trapModalFocus(event) {
-    const stops = $$(FOCUSABLE, $('#modalBackdrop')).filter((element) => element.offsetParent !== null);
+  function trapModalFocus(event, container = $('#modalBackdrop')) {
+    const stops = $$(FOCUSABLE, container).filter((element) => element.offsetParent !== null);
     if (!stops.length) return;
     const first = stops[0]; const last = stops[stops.length - 1];
     const active = document.activeElement;
-    if (event.shiftKey && (active === first || !$('#modalBackdrop').contains(active))) { event.preventDefault(); last.focus(); }
+    if (event.shiftKey && (active === first || !container.contains(active))) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
+  }
+
+  function openBrandPopup() {
+    brandPopupReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    $('#brandPopup').hidden = false;
+    document.body.classList.add('modal-open');
+    $('#brandPopupClose').focus();
+    announce('EasySched information dialog opened.');
+  }
+
+  function closeBrandPopup() {
+    $('#brandPopup').hidden = true;
+    document.body.classList.remove('modal-open');
+    if (brandPopupReturnFocus?.isConnected) brandPopupReturnFocus.focus();
+    brandPopupReturnFocus = null;
   }
 
   function inputField(id, label, value, type = 'text', required = true, extra = '') { const full = /(?:^|\s)class="[^"]*\bfull\b/.test(extra); return `<div class="field${full ? ' full' : ''}"><label for="modal-${id}">${esc(label)}</label><input id="modal-${id}" name="${esc(id)}" type="${type}" value="${esc(value)}" ${required ? 'required' : ''} ${extra}></div>`; }
   function selectField(id, label, value, options, required = true) { return `<div class="field"><label for="modal-${id}">${esc(label)}</label><select id="modal-${id}" name="${esc(id)}" ${required ? 'required' : ''}>${options.map(([optionValue, optionLabel]) => `<option value="${esc(optionValue)}" ${String(optionValue) === String(value) ? 'selected' : ''}>${esc(optionLabel)}</option>`).join('')}</select></div>`; }
+  function userAssignmentField(id, label, value, options) { return `<div class="field" data-user-assignment="${esc(id)}">${selectField(id, label, value, options, false).replace(/^<div class="field">|<\/div>$/g, '')}</div>`; }
+  function updateUserAssignmentFields() {
+    const role = $('#modal-role')?.value;
+    const instructorField = $('[data-user-assignment="instructor_id"]', $('#modalBody'));
+    const sectionField = $('[data-user-assignment="section_id"]', $('#modalBody'));
+    if (!instructorField || !sectionField) return;
+    instructorField.hidden = role !== 'instructor';
+    sectionField.hidden = role !== 'student';
+  }
   function roomFields(row) { return [inputField('code','Room code',row.code || ''), inputField('name','Room name',row.name || ''), inputField('capacity','Capacity',row.capacity || '', 'number', true, 'min="1" max="5000"'), selectField('room_type','Room type',row.room_type || 'LECTURE', [['LECTURE','Lecture'],['LAB','Laboratory'],['SPECIAL','Special']]), inputField('features','Features (comma separated)',(row.features || []).join(', '), 'text', false, 'class="full"')]; }
   function instructorFields(row) { const prefixes = ['', 'Dr.', 'Prof.', 'Engr.', 'Mr.', 'Ms.', 'Mrs.']; const suffixes = ['', 'Jr.', 'Sr.', 'II', 'III', 'IV']; const nameParts = text(row.name).trim().split(/\s+/).filter(Boolean); const prefix = prefixes.includes(nameParts[0]) ? nameParts.shift() : ''; const suffix = suffixes.includes(nameParts[nameParts.length - 1]) ? nameParts.pop() : ''; const firstName = nameParts.shift() || ''; const lastName = nameParts.length ? nameParts.pop() : ''; const middleName = nameParts.join(' '); return [selectField('prefix','Prefix',prefix,[['','None'], ...prefixes.slice(1).map((item) => [item,item])], false), inputField('first_name','First name',firstName), inputField('middle_name','Middle name',middleName, 'text', false), inputField('last_name','Last name',lastName), selectField('suffix','Suffix',suffix,[['','None'], ...suffixes.slice(1).map((item) => [item,item])], false), inputField('employee_no','Employee number',row.employee_no || ''), inputField('email','Email',row.email || '', 'email', false), inputField('max_hours_day','Maximum hours per day',row.max_hours_day || 6, 'number', true, 'min="1" max="16"')]; }
-  function subjectFields(row) { return [inputField('code','Subject code',row.code || ''), inputField('name','Subject name',row.name || ''), inputField('units','Units',row.units || 3, 'number', true, 'min="1" max="12"'), inputField('hours_per_week','Hours per week',row.hours_per_week || 2, 'number', true, 'min="1" max="40"'), inputField('duration_slots','Duration in slots',row.duration_slots || 2, 'number', true, 'min="1" max="8"'), selectField('room_type','Room type',row.room_type || 'LECTURE', [['LECTURE','Lecture'],['LAB','Laboratory'],['SPECIAL','Special']]), inputField('required_features','Required features (comma separated)',(row.required_features || []).join(', '), 'text', false, 'class="full"')]; }
+  function subjectFields(row) { return [inputField('code','Course Code',row.code || '', 'text', true, 'maxlength="40" autocomplete="off"'), inputField('name','Subject Name',row.name || '', 'text', true, 'maxlength="180" class="full"'), selectField('room_type','Room type',row.room_type || 'LECTURE',[['LECTURE','Lecture'],['LAB','Laboratory'],['SPECIAL','Special']])]; }
   function programFields(row) { return [inputField('code','Program code',row.code || ''), inputField('name','Program name',row.name || '', 'text', true, 'class="full"')]; }
   function sectionFields(row) { return [selectField('program_id','Program',row.program_id || state.snapshot.programs[0]?.id || '', state.snapshot.programs.map((item) => [item.id, `${item.code} - ${item.name}`])), selectField('term_id','Term',row.term_id || state.snapshot.active_term_id, state.snapshot.terms.map((item) => [item.id, `${item.academic_year} - ${item.semester}`])), inputField('code','Section code',row.code || ''), inputField('year_level','Year level',row.year_level || 1, 'number', true, 'min="1" max="4"'), inputField('student_count','Student count',row.student_count || 30, 'number', true, 'min="1" max="5000"')]; }
   function offeringFields(row) { return [selectField('term_id','Term',row.term_id || state.snapshot.active_term_id, state.snapshot.terms.map((item) => [item.id, `${item.academic_year} - ${item.semester}`])), selectField('subject_id','Subject',row.subject_id || state.snapshot.subjects[0]?.id || '', state.snapshot.subjects.map((item) => [item.id, item.name])), selectField('section_id','Section',row.section_id || state.snapshot.sections[0]?.id || '', state.snapshot.sections.map((item) => [item.id, item.code])), selectField('instructor_id','Instructor',row.instructor_id || state.snapshot.instructors[0]?.id || '', state.snapshot.instructors.map((item) => [item.id, item.name])), inputField('enrollment','Enrollment',row.enrollment || 30, 'number', true, 'min="1" max="5000"'), inputField('required_meetings','Meetings per week',row.required_meetings || 1, 'number', true, 'min="1" max="20"')]; }
-  function userFields(row) { return [inputField('username','Username',row.username || ''), inputField('display_name','Display name',row.display_name || ''), inputField('email','Email',row.email || '', 'email', false), selectField('role','Role',row.role || 'student',[['admin','Administrator'],['scheduler','Scheduler'],['instructor','Instructor'],['student','Student']]), selectField('instructor_id','Faculty link',row.instructor_id || '', [['','Not linked'], ...state.snapshot.instructors.map((item) => [item.id,item.name])], false), selectField('section_id','Section link',row.section_id || '', [['','Not linked'], ...state.snapshot.sections.map((item) => [item.id,item.code])], false), inputField('password',row.id ? 'New password (leave blank to keep current)' : 'Temporary password','', 'password', !row.id, 'minlength="10" class="full"')]; }
+  function userFields(row) { return [inputField('username','Username',row.username || ''), inputField('display_name','Display name',row.display_name || ''), `<div class="field"><label for="modal-email">Email</label><input id="modal-email" name="email" type="email" value="${esc(row.email || '')}" maxlength="180"><span class="field-hint">Administrators can update this directly if the user can no longer access their email.</span></div>`, selectField('role','Role',row.role || 'student',[['admin','Administrator'],['scheduler','Scheduler'],['instructor','Instructor'],['student','Student']]), userAssignmentField('instructor_id','Faculty link',row.instructor_id || '', [['','Not linked'], ...state.snapshot.instructors.map((item) => [item.id,item.name])]), userAssignmentField('section_id','Section link',row.section_id || '', [['','Not linked'], ...state.snapshot.sections.map((item) => [item.id,item.code])]), inputField('password',row.id ? 'New password (leave blank to keep current)' : 'Temporary password','', 'password', !row.id, 'minlength="10" class="full"')]; }
 
   function openDataRecord(entity, id = 0) { const record = (state.snapshot[entity] || []).find((item) => Number(item.id) === Number(id)) || {}; const mode = id ? `edit-${entity}` : `create-${entity}`; const label = DATA_META[entity].singular; openModal(id ? `Edit ${label}` : `Add ${label}`, DATA_META[entity].fields, mode, record); }
 
-  function closeModal() { const returnFocus = modalReturnFocus; $('#modalBackdrop').hidden = true; document.body.classList.remove('modal-open'); $('#modalBody').replaceChildren(); modalMode = null; modalRecord = null; modalReturnFocus = null; if (returnFocus?.isConnected) returnFocus.focus(); }
+  function downloadOfferingsTemplate() {
+    const csv = 'academic_year,semester,subject_code,subject_name,section_code,instructor_employee_no,instructor_name,enrollment,required_meetings\r\n';
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'class-assignments-template.csv';
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
-  async function submitModal(event) { event.preventDefault(); if (!modalMode) return; const entity = modalMode.replace(/^(create|edit)-/, ''); const formData = new FormData(event.currentTarget); const data = Object.fromEntries(formData.entries()); if (entity === 'instructors') { data.name = [data.prefix, data.first_name, data.middle_name, data.last_name, data.suffix].map((value) => text(value).trim()).filter(Boolean).join(' '); delete data.prefix; delete data.first_name; delete data.middle_name; delete data.last_name; delete data.suffix; } if (['rooms', 'subjects'].includes(entity)) data.features = text(data.features).split(',').map((item) => item.trim()).filter(Boolean); if (entity === 'subjects') data.required_features = text(formData.get('required_features')).split(',').map((item) => item.trim()).filter(Boolean); if (modalRecord?.id) data.id = Number(modalRecord.id); try { const result = await request('save_master', { method: 'POST', body: { entity, data } }); applySnapshot(result.snapshot); closeModal(); showToast('Saved', `${DATA_META[entity].singular} saved successfully.`); } catch (error) { showToast('Could not save', error.message, 'error'); } }
+  function exportOfferings() {
+    window.location.href = 'api.php?action=export_offerings';
+  }
 
-  function openScheduleEditor(entryId) { const row = schedules().find((item) => Number(item.id) === Number(entryId)); if (!row) return; const roomOptions = state.snapshot.rooms.map((item) => [item.id, `${item.code} - ${item.name}`]); const dayOptions = days(); const slotOptions = slots().map((item) => [item.id, item.label]); openModal(`Edit ${row.subject_code}`, () => [selectField('room_id','Room',row.room_id,roomOptions), selectField('day_of_week','Day',row.day_of_week,dayOptions), selectField('slot_id','Start time',row.slot_id,slotOptions)], 'edit-schedule', row); }
+  async function importOfferings(event) {
+    event.preventDefault();
+    const file = $('#offeringImportFile').files?.[0];
+    const status = $('#offeringImportStatus');
+    const submit = $('#offeringImportSubmit');
+    if (!file) return;
+    if (file.size > 2000000) {
+      status.textContent = 'Choose a CSV file that is 2 MB or smaller.';
+      return;
+    }
+    if (!window.confirm(`Add missing assignments from "${file.name}"? Existing Railway assignments will not be changed.`)) return;
+    submit.disabled = true;
+    status.textContent = 'Validating and importing assignments...';
+    try {
+      const csv = await file.text();
+      const result = await request('import_offerings', { method: 'POST', body: { csv } });
+      applySnapshot(result.snapshot);
+      $('#offeringImportFile').value = '';
+      const summary = `Added ${result.created} assignments. ${result.skipped} already existed and were left unchanged.`;
+      status.textContent = summary;
+      showToast('Assignments imported', summary);
+    } catch (error) {
+      const rowErrors = error.details?.rows;
+      if (Array.isArray(rowErrors) && rowErrors.length) {
+        const grouped = new Map();
+        rowErrors.forEach((item) => {
+          const rows = grouped.get(item.error) || [];
+          rows.push(item.row);
+          grouped.set(item.error, rows);
+        });
+        const summaries = Array.from(grouped, ([message, rows]) => {
+          const examples = rows.slice(0, 5).join(', ');
+          const remaining = rows.length > 5 ? `, and ${rows.length - 5} more` : '';
+          return `${message} (${rows.length} row${rows.length === 1 ? '' : 's'}: ${examples}${remaining})`;
+        });
+        const missingNames = rowErrors.some((item) => item.error.includes('Export a fresh CSV to include instructor names'));
+        const nextStep = missingNames
+          ? '\nDownload a new assignments CSV from the updated localhost app, then upload that new file here. The older CSV has no instructor names to match across databases.'
+          : '';
+        status.textContent = `${error.message}\n${summaries.join('\n')}${nextStep}`;
+      } else {
+        status.textContent = error.message;
+      }
+      showToast('Could not import assignments', error.message, 'error');
+    } finally {
+      submit.disabled = false;
+    }
+  }
 
-  async function submitScheduleEditor(event) { event.preventDefault(); const form = new FormData(event.currentTarget); try { const result = await request('save_schedule', { method: 'POST', body: { entry_id: Number(modalRecord.id), room_id: Number(form.get('room_id')), day_of_week: Number(form.get('day_of_week')), slot_id: Number(form.get('slot_id')) } }); applySnapshot(result.snapshot); closeModal(); showToast('Schedule updated', 'The entry passed hard-constraint validation.'); } catch (error) { showToast('Cannot update schedule', error.message, 'error'); } }
+  function closeModal() { const returnFocus = modalReturnFocus; $('#modalBackdrop').hidden = true; document.body.classList.remove('modal-open'); $('#modal').classList.remove('modal-calendar-details', 'modal-generation'); resetModalControls(); $('#modalBody').replaceChildren(); activeCalendarDetailGroup = null; modalMode = null; modalRecord = null; modalReturnFocus = null; if (returnFocus?.isConnected) returnFocus.focus(); }
+
+  async function submitModal(event) { event.preventDefault(); if (!modalMode) return; if (modalMode === 'manual-generate') return submitManualGeneration(event); const entity = modalMode.replace(/^(create|edit)-/, ''); const formData = new FormData(event.currentTarget); const data = Object.fromEntries(formData.entries()); if (entity === 'instructors') { data.name = [data.prefix, data.first_name, data.middle_name, data.last_name, data.suffix].map((value) => text(value).trim()).filter(Boolean).join(' '); delete data.prefix; delete data.first_name; delete data.middle_name; delete data.last_name; delete data.suffix; } if (['rooms', 'subjects'].includes(entity)) data.features = text(data.features).split(',').map((item) => item.trim()).filter(Boolean); if (entity === 'subjects') data.required_features = text(formData.get('required_features')).split(',').map((item) => item.trim()).filter(Boolean); if (modalRecord?.id) data.id = Number(modalRecord.id); try { const result = await request('save_master', { method: 'POST', body: { entity, data } }); applySnapshot(result.snapshot); closeModal(); showToast('Saved', `${DATA_META[entity].singular} saved successfully.`); } catch (error) { showToast('Could not save', error.message, 'error'); } }
+
+  function manualTimeField(name, label, value) {
+    const [hourValue, minuteValue] = String(value || '07:00').slice(0, 5).split(':').map(Number);
+    const period = hourValue >= 12 ? 'PM' : 'AM';
+    const hour = hourValue % 12 || 12;
+    return `<div class="field"><label for="modal-${name}">${label}</label><div class="time-input-group"><input id="modal-${name}" name="${name}" value="${String(hour).padStart(2, '0')}:${String(minuteValue).padStart(2, '0')}" inputmode="numeric" maxlength="5" pattern="[0-9]{2}:[0-9]{2}" placeholder="HH:MM" required><select id="modal-${name}-period" name="${name}_period" aria-label="${label} period"><option value="AM" ${period === 'AM' ? 'selected' : ''}>AM</option><option value="PM" ${period === 'PM' ? 'selected' : ''}>PM</option></select></div></div>`;
+  }
+
+  function openScheduleEditor(entryId) {
+    const row = schedules().find((item) => Number(item.id) === Number(entryId));
+    if (!row) return;
+    const roomOptions = state.snapshot.rooms.map((item) => [item.id, `${item.code} - ${item.name}`]);
+    const dayOptions = days();
+    openModal(`Edit ${row.subject_code}`, () => [
+      selectField('room_id', 'Room', row.room_id, roomOptions),
+      selectField('day_of_week', 'Day', row.day_of_week, dayOptions),
+      manualTimeField('start_time', 'Start time', row.start_time),
+      manualTimeField('end_time', 'End time', row.end_time)
+    ], 'edit-schedule', row);
+  }
+
+  function openAddScheduleModal() {
+    if (!state.snapshot.active_run) {
+      showToast('No published schedule', 'Generate a schedule before adding a class.', 'warn');
+      return;
+    }
+    const scheduledCounts = new Map();
+    schedules().forEach((row) => scheduledCounts.set(Number(row.offering_id), (scheduledCounts.get(Number(row.offering_id)) || 0) + 1));
+    const offerings = state.snapshot.offerings || [];
+    if (!offerings.length) {
+      showToast('No class assignments', 'Add a class assignment in Academic setup before scheduling a meeting.', 'warn');
+      return;
+    }
+    const offeringOptions = offerings.map((item) => {
+      const scheduled = scheduledCounts.get(Number(item.id)) || 0;
+      const remaining = Number(item.required_meetings) - scheduled;
+      const meetingStatus = remaining > 0 ? `${remaining} required remaining` : `extra meeting (${scheduled} already scheduled)`;
+      return [item.id, `${item.subject_code} · ${item.section_code} (${meetingStatus})`];
+    });
+    const roomOptions = state.snapshot.rooms.map((item) => [item.id, `${item.code} · ${item.name}`]);
+    const dayOptions = days();
+    const availableSlots = slots().filter((item) => Number(item.slot_order) !== 6);
+    if (!roomOptions.length || !dayOptions.length || !availableSlots.length) {
+      showToast('Cannot add class', 'Active rooms, weekdays, and timetable hours must be configured first.', 'error');
+      return;
+    }
+    const timeField = (name, label, value, period) => `<div class="field"><label for="modal-${name}">${label}</label><div class="time-input-group"><input id="modal-${name}" name="${name}" value="${value}" inputmode="numeric" maxlength="5" pattern="[0-9]{2}:[0-9]{2}" placeholder="HH:MM" required><select id="modal-${period}" name="${period}" aria-label="${label} period"><option selected>AM</option><option>PM</option></select></div></div>`;
+    openModal('Add class', () => [
+      selectField('offering_id', 'Course and section', offeringOptions[0][0], offeringOptions),
+      selectField('room_id', 'Room', roomOptions[0]?.[0] || '', roomOptions),
+      selectField('day_of_week', 'Day', dayOptions[0]?.[0] || '', dayOptions),
+      timeField('start_time', 'Start time', '07:00', 'start_period'),
+      timeField('end_time', 'End time', '09:00', 'end_period'),
+      '<p class="field-hint full">Enter any class duration that fits configured timetable hours. Manual additions can use a room that does not meet the class capacity, type, or feature requirements. Availability, schedule conflicts, lunch breaks, and instructor daily-hour limits are still checked.</p>',
+      '<p class="field-hint full">Adds one meeting, including extra meetings when all required meetings are scheduled.</p>'
+    ], 'add-schedule');
+  }
+
+  async function submitScheduleEditor(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const result = await request('save_schedule', {
+        method: 'POST',
+        body: {
+          entry_id: Number(modalRecord.id),
+          room_id: Number(form.get('room_id')),
+          day_of_week: Number(form.get('day_of_week')),
+          start_time: form.get('start_time'),
+          start_period: form.get('start_time_period'),
+          end_time: form.get('end_time'),
+          end_period: form.get('end_time_period')
+        }
+      });
+      applySnapshot(result.snapshot);
+      closeModal();
+      showToast('Schedule updated', 'The entry passed hard-constraint validation.');
+    } catch (error) {
+      showToast('Cannot update schedule', error.message, 'error');
+    }
+  }
+
+  async function submitAddSchedule(event) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const result = await request('add_schedule', {
+        method: 'POST',
+        body: {
+          offering_id: Number(form.get('offering_id')),
+          room_id: Number(form.get('room_id')),
+          day_of_week: Number(form.get('day_of_week')),
+          start_time: form.get('start_time'),
+          start_period: form.get('start_period'),
+          end_time: form.get('end_time'),
+          end_period: form.get('end_period')
+        }
+      });
+      applySnapshot(result.snapshot);
+      closeModal();
+      showToast('Class added', 'The class was added after schedule validation.');
+    } catch (error) {
+      showToast('Cannot add class', error.message, 'error');
+    }
+  }
 
   async function cancelScheduleEntry(entryId) { if (!canManage() || !window.confirm('Cancel this class meeting? The published run will be marked incomplete until regenerated.')) return; try { const result = await request('delete_schedule', { method: 'POST', body: { entry_id: Number(entryId) } }); applySnapshot(result.snapshot); showToast('Class cancelled', 'The meeting was removed while the schedule history was preserved.', 'warn'); } catch (error) { showToast('Cannot cancel class', error.message, 'error'); } }
 
-  async function generate() { const buttons = [$('#generateButton'), $('#dashboardGenerateButton')].filter(Boolean); buttons.forEach((button) => { button.disabled = true; button.textContent = 'Generating...'; }); try { const result = await request('generate', { method: 'POST', body: { term_id: state.snapshot.active_term_id } }); applySnapshot(result.snapshot); showToast('Schedule published', `${result.diagnostics.assigned_tasks} classes passed validation and were published.`); } catch (error) { const details = error.details || {}; const issue = details.preflight_issues?.[0] || details.explanations?.[0] || Object.keys(details.failures || {})[0]; const message = issue ? `${error.message} ${issue.replace(/^no_candidate:/, '')}` : error.message; showToast('Generation failed', message, 'error'); try { applySnapshot(await request('bootstrap')); } catch { /* Keep the current snapshot if the refresh is unavailable. */ } } finally { buttons.forEach((button) => { button.disabled = false; button.textContent = 'Generate schedule'; }); } }
+  function manualGenerationFields() {
+    const snapshot = state.snapshot;
+    const offerings = snapshot.offerings || [];
+    const sectionById = new Map((snapshot.sections || []).map((section) => [Number(section.id), section]));
+    const uniqueOptions = (key, source, labelFor) => {
+      const ids = new Set(offerings.map((offering) => Number(offering[key])));
+      return source.filter((row) => ids.has(Number(row.id))).map((row) => ({ id: Number(row.id), label: labelFor(row) }));
+    };
+    const offeredProgramIds = new Set(offerings.map((offering) => Number(sectionById.get(Number(offering.section_id))?.program_id)).filter(Boolean));
+    const groups = [
+      { key: 'program', name: 'program_ids', label: 'Programs', options: (snapshot.programs || []).filter((row) => offeredProgramIds.has(Number(row.id))).map((row) => ({ id: Number(row.id), label: `${row.code} · ${row.name}` })) },
+      { key: 'section', name: 'section_ids', label: 'Sections', options: uniqueOptions('section_id', snapshot.sections || [], (row) => `${row.code} · ${row.program_code || sectionById.get(Number(row.id))?.program_code || 'Program'}`) },
+      { key: 'subject', name: 'subject_ids', label: 'Subjects', options: uniqueOptions('subject_id', snapshot.subjects || [], (row) => `${row.code} · ${row.name}`) },
+      { key: 'instructor', name: 'instructor_ids', label: 'Instructors', options: uniqueOptions('instructor_id', snapshot.instructors || [], (row) => row.name) }
+    ];
+    const groupMarkup = groups.map((group) => `<fieldset class="manual-generation-group" data-generation-group="${group.key}"><legend class="manual-generation-legend">${esc(group.label)}</legend><div class="manual-generation-group-actions"><button class="button button-ghost" type="button" data-generation-filter-action="all">All</button><button class="button button-ghost" type="button" data-generation-filter-action="clear">Clear</button></div><div class="manual-generation-options">${group.options.length ? group.options.map((option) => `<label class="manual-generation-option"><input type="checkbox" name="${group.name}" value="${option.id}"><span>${esc(option.label)}</span></label>`).join('') : '<span class="manual-generation-empty">No active options</span>'}</div></fieldset>`).join('');
+    return [`<p class="manual-generation-note">Choose at least one filter. When multiple filter groups are used, an offering must match every selected group. Matching offerings are regenerated; all other published classes are preserved.</p><div class="manual-generation-grid">${groupMarkup}</div><p class="manual-generation-preview" data-generation-preview aria-live="polite"></p>`];
+  }
+
+  function updateManualGenerationPreview() {
+    if (modalMode !== 'manual-generate') return;
+    const form = $('#modalForm');
+    const selected = {
+      program_ids: new Set(Array.from(form.querySelectorAll('[name="program_ids"]:checked'), (input) => Number(input.value))),
+      section_ids: new Set(Array.from(form.querySelectorAll('[name="section_ids"]:checked'), (input) => Number(input.value))),
+      subject_ids: new Set(Array.from(form.querySelectorAll('[name="subject_ids"]:checked'), (input) => Number(input.value))),
+      instructor_ids: new Set(Array.from(form.querySelectorAll('[name="instructor_ids"]:checked'), (input) => Number(input.value)))
+    };
+    const hasSelection = Object.values(selected).some((ids) => ids.size > 0);
+    const sectionById = new Map((state.snapshot.sections || []).map((section) => [Number(section.id), section]));
+    const matches = (state.snapshot.offerings || []).filter((offering) => {
+      const section = sectionById.get(Number(offering.section_id));
+      return (!selected.program_ids.size || selected.program_ids.has(Number(section?.program_id)))
+        && (!selected.section_ids.size || selected.section_ids.has(Number(offering.section_id)))
+        && (!selected.subject_ids.size || selected.subject_ids.has(Number(offering.subject_id)))
+        && (!selected.instructor_ids.size || selected.instructor_ids.has(Number(offering.instructor_id)));
+    });
+    const meetings = matches.reduce((total, offering) => total + Math.max(1, Number(offering.required_meetings) || 1), 0);
+    const preview = $('[data-generation-preview]', $('#modalBody'));
+    const submit = $('.modal-footer button[type="submit"]');
+    if (!hasSelection) {
+      preview.textContent = 'Select one or more filters to preview the offerings that will be regenerated.';
+      submit.disabled = true;
+    } else if (!matches.length) {
+      preview.textContent = 'No active offerings match these filter choices. Adjust your selections to continue.';
+      submit.disabled = true;
+    } else {
+      preview.textContent = `${matches.length} offering${matches.length === 1 ? '' : 's'} · ${meetings} meeting${meetings === 1 ? '' : 's'} will be regenerated.`;
+      submit.disabled = false;
+    }
+  }
+
+  function openManualGenerationModal() {
+    if (!canManage()) return;
+    openModal('Manual schedule generation', manualGenerationFields, 'manual-generate');
+    updateManualGenerationPreview();
+  }
+
+  async function submitManualGeneration(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = $('.modal-footer button[type="submit"]');
+    const cancel = $('#modalCancelButton');
+    const close = $('#modalCloseButton');
+    const selectedIds = (name) => Array.from(new FormData(form).getAll(name), Number);
+    const body = {
+      term_id: Number(state.snapshot.active_term_id),
+      program_ids: selectedIds('program_ids'),
+      section_ids: selectedIds('section_ids'),
+      subject_ids: selectedIds('subject_ids'),
+      instructor_ids: selectedIds('instructor_ids')
+    };
+    submit.disabled = true;
+    cancel.disabled = true;
+    close.disabled = true;
+    submit.textContent = 'Generating...';
+    try {
+      const result = await request('generate_selected', { method: 'POST', body });
+      applySnapshot(result.snapshot);
+      closeModal();
+      showToast('Manual schedule published', `${result.diagnostics.generated_tasks} selected meetings generated; ${result.diagnostics.preserved_entries} existing classes preserved.`);
+    } catch (error) {
+      const details = error.details || {};
+      const issue = details.preflight_issues?.[0] || details.explanations?.[0] || Object.keys(details.failures || {})[0];
+      showToast('Manual generation failed', issue ? `${error.message} ${issue.replace(/^no_candidate:/, '')}` : error.message, 'error');
+    } finally {
+      if (modalMode === 'manual-generate') {
+        cancel.disabled = false;
+        close.disabled = false;
+        submit.textContent = 'Generate selected';
+        updateManualGenerationPreview();
+      }
+    }
+  }
+
+  async function generate() { const buttons = [$('#generateButton'), $('#dashboardGenerateButton')].filter(Boolean); const originalContent = buttons.map((button) => button.innerHTML); buttons.forEach((button) => { button.disabled = true; button.textContent = 'Generating...'; }); try { const result = await request('generate', { method: 'POST', body: { term_id: state.snapshot.active_term_id } }); applySnapshot(result.snapshot); showToast('Schedule published', `${result.diagnostics.assigned_tasks} classes passed validation and were published.`); } catch (error) { const details = error.details || {}; const issue = details.preflight_issues?.[0] || details.explanations?.[0] || Object.keys(details.failures || {})[0]; const message = issue ? `${error.message} ${issue.replace(/^no_candidate:/, '')}` : error.message; showToast('Generation failed', message, 'error'); try { applySnapshot(await request('bootstrap')); } catch { /* Keep the current snapshot if the refresh is unavailable. */ } } finally { buttons.forEach((button, index) => { button.disabled = false; button.innerHTML = originalContent[index]; }); } }
 
   function exportSchedule() { window.location.href = 'api.php?action=export'; }
   function exportReport() {
@@ -709,28 +1557,194 @@
   async function logout() { try { await request('logout', { method: 'POST', body: {} }); } catch (error) { /* session may already be gone */ } state.snapshot = null; showPublicHome(); }
 
   async function saveSettings(event) { event.preventDefault(); try { const result = await request('save_settings', { method: 'POST', body: { academic_year: $('#academicYear').value, semester: $('#semester').value } }); applySnapshot(result.snapshot); showToast('Term saved', 'The active academic term was updated.'); } catch (error) { showToast('Cannot save term', error.message, 'error'); } }
+  async function sendEmailChangeOtp() {
+    if (!$('#newEmail').reportValidity()) return;
+    const button = $('#requestEmailOtpButton');
+    const status = $('#emailChangeStatus');
+    button.disabled = true;
+    status.textContent = 'Sending verification code…';
+    try {
+      const result = await request('request_email_change_otp', { method: 'POST', body: { new_email: $('#newEmail').value } });
+      status.textContent = result.message;
+    } catch (error) {
+      status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+  async function confirmEmailChange(event) {
+    event.preventDefault();
+    const status = $('#emailChangeStatus');
+    try {
+      const result = await request('confirm_email_change', { method: 'POST', body: { otp: $('#emailChangeOtp').value } });
+      $('#emailChangeForm').reset();
+      status.textContent = result.message;
+      applySnapshot(result.snapshot);
+      showToast('Email updated', result.message);
+    } catch (error) {
+      status.textContent = error.message;
+    }
+  }
+  async function saveStudentProfile(event) {
+    event.preventDefault();
+    const form = event.target;
+    const body = Object.fromEntries(new FormData(form).entries());
+    body.section = form.dataset.profileForm;
+    try {
+      const result = await request('save_student_profile', { method: 'POST', body });
+      applySnapshot(result.snapshot);
+      showToast('Profile saved', 'Your information has been updated. Please verify it again if everything is correct.');
+    } catch (error) {
+      showToast('Cannot save profile', error.message, 'error');
+    }
+  }
+  async function updateProfileVerification(event) {
+    const checkbox = event.target;
+    const verified = checkbox.checked;
+    try {
+      const result = await request('save_student_profile', { method: 'POST', body: { section: 'verification', verified } });
+      applySnapshot(result.snapshot);
+      showToast(verified ? 'Information verified' : 'Verification removed', verified ? 'Your profile is marked as verified.' : 'Your profile is no longer marked as verified.');
+    } catch (error) {
+      checkbox.checked = !verified;
+      showToast('Cannot verify profile', error.message, 'error');
+    }
+  }
   async function changePassword(event) { event.preventDefault(); try { const result = await request('change_password', { method: 'POST', body: { current_password: $('#currentPassword').value, new_password: $('#newPassword').value, confirm_password: $('#confirmPassword').value } }); $('#passwordForm').reset(); showToast('Password changed', result.message); } catch (error) { showToast('Cannot change password', error.message, 'error'); } }
 
   function closeSidebar() { $('#sidebar').classList.remove('open'); $('#sidebarBackdrop').classList.remove('active'); $('#menuButton').setAttribute('aria-expanded', 'false'); }
   function toggleSidebar() { const open = $('#sidebar').classList.toggle('open'); $('#sidebarBackdrop').classList.toggle('active', open); $('#menuButton').setAttribute('aria-expanded', String(open)); }
   function isTypingIn(target) { return target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName)); }
 
+  function initHomeScrollReveals() {
+    const home = $('#publicHome');
+    if (!home || !('IntersectionObserver' in window) || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const groups = $$('.home-section-heading, .home-feature-grid, .home-step-grid, .home-benefit-grid, .home-about-copy, .home-contact-wrap', home)
+      .map((group) => Array.from(group.children));
+    if (!groups.some((group) => group.length)) return;
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('is-visible');
+        observer.unobserve(entry.target);
+      });
+    }, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+
+    home.classList.add('has-scroll-reveals');
+    groups.forEach((group) => {
+      group.forEach((element, index) => {
+        element.classList.add('home-reveal');
+        element.style.setProperty('--home-reveal-delay', `${Math.min(index, 5) * 85}ms`);
+        observer.observe(element);
+      });
+    });
+  }
+
   function bindEvents() {
+    window.addEventListener('popstate', handleRouteChange);
+    const calendar = $('#calendarGrid');
+    window.addEventListener('resize', resizeDefaultCalendarLayout);
+    calendar.addEventListener('pointerdown', beginCalendarResize);
+    calendar.addEventListener('pointermove', moveCalendarResize);
+    calendar.addEventListener('pointerup', endCalendarResize);
+    calendar.addEventListener('pointercancel', endCalendarResize);
+    calendar.addEventListener('keydown', keyboardResizeCalendar);
+    const homeContactForm = $('#homeContactForm');
+    homeContactForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const status = $('#homeContactStatus');
+      const submit = homeContactForm.querySelector('[type="submit"]');
+      submit.disabled = true;
+      status.textContent = 'Sending your message…';
+      status.removeAttribute('data-error');
+      try {
+        const response = await fetch(homeContactForm.action, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.fromEntries(new FormData(homeContactForm).entries()))
+        });
+        const payload = await response.json();
+        if (!response.ok || payload.ok !== true) {
+          throw new Error(payload.error || 'Your message could not be sent. Please try again later.');
+        }
+        status.textContent = payload.data?.message || 'Your message has been sent.';
+        homeContactForm.reset();
+      } catch (error) {
+        status.textContent = error.message || 'Your message could not be sent. Please try again later.';
+        status.setAttribute('data-error', 'true');
+      } finally {
+        submit.disabled = false;
+      }
+    });
+    $('#brandPopupTrigger').addEventListener('click', openBrandPopup);
+    $('#brandPopupClose').addEventListener('click', closeBrandPopup);
+    $('#brandPopup').addEventListener('mousedown', (event) => { if (event.target === $('#brandPopup')) closeBrandPopup(); });
+    document.addEventListener('submit', (event) => { if (event.target.matches('[data-profile-form]')) saveStudentProfile(event); });
+    document.addEventListener('change', (event) => { if (event.target.matches('#profileVerified')) updateProfileVerification(event); });
+    document.addEventListener('click', (event) => {
+      const edit = event.target.closest('[data-profile-edit]');
+      if (edit) setProfileSectionEditing(edit.dataset.profileEdit, true);
+      const cancel = event.target.closest('[data-profile-cancel]');
+      if (cancel) renderProfile();
+    });
     $$('[data-show-login]').forEach((button) => button.addEventListener('click', showSignIn));
     $('#backToHomeButton').addEventListener('click', showPublicHome);
     $('#themeToggle').addEventListener('click', toggleTheme);
     $('#refreshLoginCaptcha').addEventListener('click', refreshLoginCaptcha);
-    $('#loginForm').addEventListener('submit', login); $('#registrationForm').addEventListener('submit', registerStudent); $('#showRegistrationButton').addEventListener('click', showRegistration); $('#forgotPasswordButton').addEventListener('click', showForgotPassword); $('#backToLoginButton').addEventListener('click', () => showLogin()); $('#backFromResetButton').addEventListener('click', () => showLogin()); $('#sendRegistrationOtpButton').addEventListener('click', sendRegistrationOtp); $('#sendResetOtpButton').addEventListener('click', sendResetOtp); $('#forgotPasswordForm').addEventListener('submit', resetPassword); $('#logoutButton').addEventListener('click', logout); $('#menuButton').addEventListener('click', toggleSidebar); $('#sidebarBackdrop').addEventListener('click', closeSidebar); $('#modalCloseButton').addEventListener('click', closeModal); $('#modalCancelButton').addEventListener('click', closeModal); $('#modalForm').addEventListener('submit', (event) => modalMode === 'edit-schedule' ? submitScheduleEditor(event) : submitModal(event)); $('#generateButton').addEventListener('click', generate); $('#dashboardGenerateButton').addEventListener('click', generate); $('#exportButton').addEventListener('click', exportSchedule); $('#reportExportButton').addEventListener('click', exportReport); $('#printButton').addEventListener('click', () => window.print()); $('#settingsForm').addEventListener('submit', saveSettings); $('#passwordForm').addEventListener('submit', changePassword);
-    $('#globalSearch').addEventListener('input', (event) => { state.query = event.target.value; if (state.page === 'schedules') renderSchedules(); if (state.page === 'data') renderData(); }); $('#scheduleViewFilter').addEventListener('change', (event) => { state.scheduleView = event.target.value; state.scheduleFilter = 'all'; renderSchedules(); }); $('#scheduleFilterValue').addEventListener('change', (event) => { state.scheduleFilter = event.target.value; renderSchedules(); }); $('#addRecordButton').addEventListener('click', () => openDataRecord(state.dataTab));
+    $('#loginForm').addEventListener('submit', login); $('#registrationForm').addEventListener('submit', registerStudent); $('#showRegistrationButton').addEventListener('click', showRegistration); $('#forgotPasswordButton').addEventListener('click', showForgotPassword); $('#backToLoginButton').addEventListener('click', () => showLogin('', true, true)); $('#backFromResetButton').addEventListener('click', () => showLogin('', true, true)); $('#sendRegistrationOtpButton').addEventListener('click', sendRegistrationOtp); $('#sendResetOtpButton').addEventListener('click', sendResetOtp); $('#forgotPasswordForm').addEventListener('submit', resetPassword); $('#logoutButton').addEventListener('click', logout); $('#menuButton').addEventListener('click', toggleSidebar); $('#sidebarBackdrop').addEventListener('click', closeSidebar);     $('#modalCloseButton').addEventListener('click', closeModal); $('#modalCancelButton').addEventListener('click', closeModal); $('#modalForm').addEventListener('submit', (event) => modalMode === 'edit-schedule' ? submitScheduleEditor(event) : modalMode === 'add-schedule' ? submitAddSchedule(event) : submitModal(event)); $('#generateButton').addEventListener('click', generate); $('#manualGenerateButton').addEventListener('click', openManualGenerationModal); $('#addScheduleButton').addEventListener('click', openAddScheduleModal); $('#dashboardGenerateButton').addEventListener('click', generate); $('#exportButton').addEventListener('click', exportSchedule); $('#reportExportButton').addEventListener('click', exportReport); $('#printButton').addEventListener('click', () => window.print()); $('#settingsForm').addEventListener('submit', saveSettings); $('#passwordForm').addEventListener('submit', changePassword); $('#requestEmailOtpButton').addEventListener('click', sendEmailChangeOtp); $('#emailChangeForm').addEventListener('submit', confirmEmailChange);
+    $('#globalSearch').addEventListener('input', (event) => { state.query = event.target.value; if (state.page === 'dashboard') renderDashboard(); if (state.page === 'schedules') renderSchedules(); if (state.page === 'data') renderData(); }); $('#scheduleViewFilter').addEventListener('change', (event) => { state.scheduleView = event.target.value; state.scheduleFilter = 'all'; renderSchedules(); }); $('#scheduleFilterValue').addEventListener('change', (event) => { state.scheduleFilter = event.target.value; renderSchedules(); }); $('#addRecordButton').addEventListener('click', () => openDataRecord(state.dataTab));
+    $('#calendarWeekView').addEventListener('click', () => { state.calendarView = 'week'; renderSchedules(); });
+    $('#calendarDayView').addEventListener('click', () => { state.calendarView = 'day'; renderSchedules(); });
+    $('#calendarDayFilter').addEventListener('change', (event) => { state.calendarDay = event.target.value; renderSchedules(); });
+    $('#calendarGrid').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-calendar-detail-id]');
+      if (button) openCalendarDetails(button.dataset.calendarDetailId);
+    });
+    $('#modalBody').addEventListener('input', (event) => {
+      if (event.target.matches('[data-schedule-detail-search]')) renderCalendarDetailResults();
+    });
+    $('#modalBody').addEventListener('change', (event) => {
+      if (event.target.matches('[data-schedule-detail-filter]')) renderCalendarDetailResults();
+      if (event.target.matches('#modal-role')) updateUserAssignmentFields();
+      if (event.target.matches('.manual-generation-options input')) updateManualGenerationPreview();
+    });
+    $('#modalBody').addEventListener('click', (event) => {
+      const action = event.target.closest('[data-generation-filter-action]');
+      if (!action) return;
+      const group = action.closest('[data-generation-group]');
+      if (!group) return;
+      group.querySelectorAll('.manual-generation-options input').forEach((input) => { input.checked = action.dataset.generationFilterAction === 'all'; });
+      updateManualGenerationPreview();
+    });
+    $('#subjectSearch').addEventListener('input', (event) => { state.subjectQuery = event.target.value; if (state.page === 'data' && state.dataTab === 'subjects') renderData(); });
+    $('#offeringImportForm').addEventListener('submit', importOfferings);
+    $('#offeringImportTemplate').addEventListener('click', downloadOfferingsTemplate);
+    $('#offeringExportButton').addEventListener('click', exportOfferings);
     $('#helpBackButton').addEventListener('click', () => { if (helpIndex > 0) { helpIndex -= 1; renderHelp(); } }); $('#helpNextButton').addEventListener('click', () => { const slides = HELP_SLIDES[role()] || helpSlides; if (helpIndex < slides.length - 1) { helpIndex += 1; renderHelp(); } else navigate('dashboard'); });
+    $('#helpDots').addEventListener('click', (event) => {
+      const stepButton = event.target.closest('[data-help-index]');
+      if (!stepButton) return;
+      const step = Number(stepButton.dataset.helpIndex);
+      const slides = HELP_SLIDES[role()] || helpSlides;
+      if (!Number.isInteger(step) || step < 0 || step >= slides.length) return;
+      helpIndex = step;
+      renderHelp();
+    });
     $('#requestOffering').addEventListener('change', invalidateRoomAvailability); $('#requestDate').addEventListener('change', updateRequestDate);
     ['#requestOffering', '#requestDate', '#requestStartTime', '#requestStartPeriod', '#requestEndTime', '#requestEndPeriod'].forEach((selector) => { const field = $(selector); field.addEventListener('input', invalidateRoomAvailability); field.addEventListener('change', invalidateRoomAvailability); });
     $('#requestRoom').addEventListener('change', () => { $('#submitRoomRequestButton').disabled = !availableRoomsReady || !roomRequestAllowed || !$('#requestRoom').value; });
-    $('#scheduleRequestForm').addEventListener('submit', requestSchedule); ['#requestStartTime', '#requestEndTime'].forEach((selector) => $(selector).addEventListener('input', (event) => formatTimeInput(event.target))); document.addEventListener('click', (event) => { const navigateButton = event.target.closest('[data-navigate]'); if (navigateButton) navigate(navigateButton.dataset.navigate); const dataTab = event.target.closest('[data-data-tab]'); if (dataTab) { state.dataTab = dataTab.dataset.dataTab; $$('.tab-button').forEach((button) => { const active = button.dataset.dataTab === state.dataTab; button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active)); }); renderData(); } const review = event.target.closest('.review-registration'); if (review) reviewRegistration(Number(review.dataset.registrationId), review.dataset.decision); const scheduleReview = event.target.closest('.review-schedule-request'); if (scheduleReview) reviewScheduleRequest(Number(scheduleReview.dataset.requestId), scheduleReview.dataset.decision); const edit = event.target.closest('.edit-record'); if (edit) openDataRecord(edit.dataset.entity, Number(edit.dataset.recordId)); const del = event.target.closest('.delete-record'); if (del) deleteRecord(del.dataset.entity, Number(del.dataset.recordId)); const editEntry = event.target.closest('.edit-entry'); if (editEntry) openScheduleEditor(Number(editEntry.dataset.entryId)); const cancelEntry = event.target.closest('.cancel-entry'); if (cancelEntry) cancelScheduleEntry(Number(cancelEntry.dataset.entryId)); });
+    $('#scheduleRequestForm').addEventListener('submit', requestSchedule); ['#requestStartTime', '#requestEndTime'].forEach((selector) => $(selector).addEventListener('input', (event) => formatTimeInput(event.target)));             document.addEventListener('click', (event) => { const dashboardManualGenerate = event.target.closest('[data-dashboard-manual-generate]'); if (dashboardManualGenerate) { openManualGenerationModal(); return; } const dashboardGenerate = event.target.closest('[data-dashboard-generate]'); if (dashboardGenerate) { generate(); return; } const dashboardAdd = event.target.closest('[data-dashboard-add]'); if (dashboardAdd) { navigate('schedules'); openAddScheduleModal(); return; } const navigateButton = event.target.closest('[data-navigate]'); if (navigateButton) { if (!navigateButton.dataset.navigate) return; if (navigateButton.dataset.dashboardTab) state.dataTab = navigateButton.dataset.dashboardTab; navigate(navigateButton.dataset.navigate); } const dataTab = event.target.closest('[data-data-tab]'); if (dataTab) { state.dataTab = dataTab.dataset.dataTab; $$('.tab-button').forEach((button) => { const active = button.dataset.dataTab === state.dataTab; button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active)); }); renderData(); } const review = event.target.closest('.review-registration'); if (review) reviewRegistration(Number(review.dataset.registrationId), review.dataset.decision); const scheduleReview = event.target.closest('.review-schedule-request'); if (scheduleReview) reviewScheduleRequest(Number(scheduleReview.dataset.requestId), scheduleReview.dataset.decision); const edit = event.target.closest('.edit-record'); if (edit) openDataRecord(edit.dataset.entity, Number(edit.dataset.recordId)); const del = event.target.closest('.delete-record'); if (del) deleteRecord(del.dataset.entity, Number(del.dataset.recordId)); const editEntry = event.target.closest('.edit-entry'); if (editEntry) openScheduleEditor(Number(editEntry.dataset.entryId)); const cancelEntry = event.target.closest('.cancel-entry'); if (cancelEntry) cancelScheduleEntry(Number(cancelEntry.dataset.entryId)); });
+    document.addEventListener('input', (event) => {
+      if (event.target.matches('#modal-start_time, #modal-end_time')) formatTimeInput(event.target);
+    });
     document.addEventListener('keydown', (event) => {
       const modalOpen = !$('#modalBackdrop').hidden;
-      if (event.key === 'Escape') { if (modalOpen) closeModal(); closeSidebar(); return; }
-      if (modalOpen) { if (event.key === 'Tab') trapModalFocus(event); return; }
+      const brandPopupOpen = !$('#brandPopup').hidden;
+      if (event.key === 'Escape') { if (modalOpen) closeModal(); if (brandPopupOpen) closeBrandPopup(); closeSidebar(); return; }
+      if (modalOpen || brandPopupOpen) { if (event.key === 'Tab') trapModalFocus(event, brandPopupOpen ? $('#brandPopup') : $('#modalBackdrop')); return; }
       // "/" jumps to the view filter, matching the hint rendered beside the field.
       if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !isTypingIn(event.target)) {
         const search = $('#globalSearch'); const field = search?.closest('.search-field');
@@ -738,6 +1752,7 @@
       }
     });
     $('#modalBackdrop').addEventListener('mousedown', (event) => { if (event.target === $('#modalBackdrop')) closeModal(); });
+    initHomeScrollReveals();
     const homePreview = $('#homeDashboardPreview');
     if (homePreview && window.matchMedia('(prefers-reduced-motion: no-preference)').matches) {
       const updateHomeParallax = () => {
@@ -763,6 +1778,28 @@
     }
   }
 
-  async function start() { bindEvents(); try { const result = await request('bootstrap'); if (!registrationOpen) applySnapshot(result); } catch (error) { if (error.status !== 401 && !registrationOpen) showLogin(error.message); } }
+  async function start() {
+    bindEvents();
+    const initialRoute = readRoute();
+    if ((NAV.admin || []).some(([id]) => id === initialRoute)) state.page = initialRoute;
+    if (initialRoute === 'login') showLogin('', false);
+    if (initialRoute === 'register') await showRegistration(false);
+    if (initialRoute === 'forgot-password') showForgotPassword(false);
+    if (initialRoute === 'home') canonicalizeHomePath();
+    try {
+      const result = await request('bootstrap');
+      if (initialRoute === 'home' || initialRoute === 'login' || initialRoute === 'register' || initialRoute === 'forgot-password') state.page = 'dashboard';
+      applySnapshot(result);
+    } catch (error) {
+      if (error.status === 401) {
+        if ((NAV.admin || []).some(([id]) => id === initialRoute)) {
+          showLogin('', false);
+          setRoute('login', true);
+        }
+        return;
+      }
+      showLogin(error.message);
+    }
+  }
   document.addEventListener('DOMContentLoaded', start);
 })();

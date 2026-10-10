@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS rooms (
 );
 CREATE TABLE IF NOT EXISTS subjects (
     id BIGSERIAL PRIMARY KEY,
-    code TEXT NOT NULL UNIQUE,
+    code TEXT NOT NULL,
     name TEXT NOT NULL,
     units INTEGER NOT NULL DEFAULT 3 CHECK (units BETWEEN 1 AND 12),
     hours_per_week INTEGER NOT NULL DEFAULT 2 CHECK (hours_per_week BETWEEN 1 AND 40),
@@ -60,6 +60,32 @@ CREATE TABLE IF NOT EXISTS users (
     section_id BIGINT REFERENCES sections(id) ON DELETE SET NULL,
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS student_profiles (
+    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    sex TEXT NOT NULL DEFAULT '',
+    birthdate TEXT NOT NULL DEFAULT '',
+    mobile_number TEXT NOT NULL DEFAULT '',
+    father_first_name TEXT NOT NULL DEFAULT '',
+    father_middle_name TEXT NOT NULL DEFAULT '',
+    father_last_name TEXT NOT NULL DEFAULT '',
+    mother_first_name TEXT NOT NULL DEFAULT '',
+    mother_middle_name TEXT NOT NULL DEFAULT '',
+    mother_last_name TEXT NOT NULL DEFAULT '',
+    guardian_first_name TEXT NOT NULL DEFAULT '',
+    guardian_middle_name TEXT NOT NULL DEFAULT '',
+    guardian_last_name TEXT NOT NULL DEFAULT '',
+    guardian_email TEXT NOT NULL DEFAULT '',
+    guardian_contact_number TEXT NOT NULL DEFAULT '',
+    guardian_relation TEXT NOT NULL DEFAULT '',
+    block_lot TEXT NOT NULL DEFAULT '',
+    street_name TEXT NOT NULL DEFAULT '',
+    barangay TEXT NOT NULL DEFAULT '',
+    city_municipality TEXT NOT NULL DEFAULT '',
+    province TEXT NOT NULL DEFAULT '',
+    zip_code TEXT NOT NULL DEFAULT '',
+    verified_at TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS pending_registrations (
     id BIGSERIAL PRIMARY KEY,
@@ -147,7 +173,9 @@ CREATE TABLE IF NOT EXISTS schedule_entries (
     room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
     day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
     slot_id BIGINT NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,
+    start_time_override TEXT,
     end_time_override TEXT,
+    room_fit_override INTEGER NOT NULL DEFAULT 0 CHECK (room_fit_override IN (0, 1)),
     status TEXT NOT NULL DEFAULT 'PUBLISHED' CHECK (status IN ('PUBLISHED', 'CANCELLED')),
     UNIQUE (run_id, offering_id, meeting_no)
 );
@@ -161,6 +189,22 @@ CREATE TABLE IF NOT EXISTS schedule_occupancy (
     slot_id BIGINT NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,
     UNIQUE (run_id, resource_type, resource_id, day_of_week, slot_id)
 );
+CREATE TABLE IF NOT EXISTS schedule_requests (
+    id BIGSERIAL PRIMARY KEY,
+    term_id BIGINT NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
+    offering_id BIGINT NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    instructor_id BIGINT NOT NULL REFERENCES instructors(id) ON DELETE RESTRICT,
+    room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+    request_date TEXT,
+    day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
+    slot_id BIGINT NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,
+    requested_end_time TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS audit_logs (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
@@ -172,6 +216,19 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE TABLE IF NOT EXISTS system_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS login_throttles (throttle_key TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0), window_started_at BIGINT NOT NULL, locked_until BIGINT NOT NULL DEFAULT 0);
+DO $$
+DECLARE subject_code_constraint RECORD;
+BEGIN
+    FOR subject_code_constraint IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'subjects'::regclass
+          AND contype = 'u'
+          AND pg_get_constraintdef(oid) = 'UNIQUE (code)'
+    LOOP
+        EXECUTE format('ALTER TABLE subjects DROP CONSTRAINT %I', subject_code_constraint.conname);
+    END LOOP;
+END $$;
+DROP INDEX IF EXISTS uq_subjects_code_nocase;
 CREATE TABLE IF NOT EXISTS email_otps (
     id BIGSERIAL PRIMARY KEY,
     purpose TEXT NOT NULL CHECK (purpose IN ('REGISTRATION', 'PASSWORD_RESET')),
@@ -183,12 +240,31 @@ CREATE TABLE IF NOT EXISTS email_otps (
     consumed_at BIGINT,
     created_at_epoch BIGINT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS email_change_otps (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    max_attempts INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 10),
+    consumed_at BIGINT,
+    created_at_epoch BIGINT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_programs_code_nocase ON programs (LOWER(code));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_instructors_employee_no_nocase ON instructors (LOWER(employee_no));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_rooms_code_nocase ON rooms (LOWER(code));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username_nocase ON users (LOWER(username));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_registrations_username_nocase ON pending_registrations (LOWER(username));
+CREATE UNIQUE INDEX IF NOT EXISTS uq_time_slots_code_nocase ON time_slots (LOWER(code));
 CREATE INDEX IF NOT EXISTS idx_sections_term ON sections(term_id);
 CREATE INDEX IF NOT EXISTS idx_offerings_term ON course_offerings(term_id, status);
 CREATE INDEX IF NOT EXISTS idx_offerings_section ON course_offerings(section_id);
 CREATE INDEX IF NOT EXISTS idx_offerings_instructor ON course_offerings(instructor_id);
 CREATE INDEX IF NOT EXISTS idx_pending_registrations_status ON pending_registrations(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_schedule_requests_status ON schedule_requests(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_email_otps_lookup ON email_otps(purpose, identifier, created_at_epoch DESC);
+CREATE INDEX IF NOT EXISTS idx_email_change_otps_lookup ON email_change_otps(user_id, created_at_epoch DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_term_status ON schedule_runs(term_id, status);
 CREATE INDEX IF NOT EXISTS idx_schedule_entries_run ON schedule_entries(run_id);
 CREATE INDEX IF NOT EXISTS idx_occupancy_run_resource ON schedule_occupancy(run_id, resource_type, resource_id);

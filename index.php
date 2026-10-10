@@ -7,6 +7,8 @@ easysched_start_session();
 easysched_send_security_headers();
 
 $contactEmail = easysched_contact_email();
+$_SESSION['csrf'] ??= bin2hex(random_bytes(32));
+$contactCsrf = (string) $_SESSION['csrf'];
 
 /**
  * Inline icon set. The content security policy allows no external assets, so
@@ -47,13 +49,26 @@ function easysched_icon(string $name, string $size = '20'): string
         . $body . '</svg>';
 }
 
-$assetVersion = filemtime(__DIR__ . DIRECTORY_SEPARATOR . 'script.js') . '-' . filemtime(__DIR__ . DIRECTORY_SEPARATOR . 'styles.css');
+$assetVersion = substr(
+    hash_file('sha256', __DIR__ . DIRECTORY_SEPARATOR . 'script.js')
+        . hash_file('sha256', __DIR__ . DIRECTORY_SEPARATOR . 'styles.css'),
+    0,
+    16
+);
+$appBasePath = str_replace('\\', '/', dirname((string) ($_SERVER['SCRIPT_NAME'] ?? '/index.php')));
+if ($appBasePath === '.' || $appBasePath === '/') {
+    $appBasePath = '';
+} else {
+    $appBasePath = rtrim($appBasePath, '/');
+}
 const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
 ?><!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="app-base-path" content="<?= htmlspecialchars($appBasePath, ENT_QUOTES, 'UTF-8') ?>">
+    <base href="<?= htmlspecialchars(($appBasePath === '' ? '' : $appBasePath) . '/', ENT_QUOTES, 'UTF-8') ?>">
     <meta name="color-scheme" content="light dark">
     <meta name="theme-color" content="#faf9f6" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#1a1917" media="(prefers-color-scheme: dark)">
@@ -97,7 +112,6 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                     <a class="home-button home-button-outline" href="#homeFeatures">Learn more</a>
                 </div>
             </div>
-            <a class="home-scroll" href="#homeFeatures" aria-label="Scroll to features"><span></span>Scroll down</a>
         </section>
 
         <section class="home-section home-features" id="homeFeatures" aria-labelledby="featuresTitle">
@@ -159,7 +173,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
         <section class="home-contact" id="homeContact" aria-labelledby="contactTitle">
             <div class="home-contact-wrap">
                 <h1 id="contactTitle">Contact Us</h1>
-                <p class="home-contact-intro">We’d love to hear from you! If you have any questions, feedback, or need assistance, please reach out using the email below or fill out our contact form, and we’ll get back to you as soon as possible.</p>
+                <p class="home-contact-intro">We’d love to hear from you! If you have any questions, feedback, or need assistance, please email us or send a message using the form below.</p>
 
                 <div class="home-contact-email-box">
                     <p class="home-contact-kicker">Reach us directly</p>
@@ -169,30 +183,33 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                 <div class="home-contact-form-box">
                     <p class="home-contact-kicker">Get in touch</p>
                     <h2>Contact Form</h2>
-                    <p>Please fill out the form below with your name, email, and message. Our team will review your inquiry and respond promptly.</p>
+                    <p>Send us your name, email, and message. Our team will review your inquiry and respond promptly.</p>
 
-                    <form class="home-contact-form" action="mailto:<?= htmlspecialchars($contactEmail, ENT_QUOTES, 'UTF-8') ?>" method="post" enctype="text/plain">
+                    <form id="homeContactForm" class="home-contact-form" action="api.php?action=contact_message" method="post">
+                        <input type="hidden" name="csrf" value="<?= htmlspecialchars($contactCsrf, ENT_QUOTES, 'UTF-8') ?>">
+                        <div class="home-contact-honeypot" aria-hidden="true">
+                            <label for="contactWebsite">Leave this field empty</label>
+                            <input id="contactWebsite" name="website" type="text" tabindex="-1" autocomplete="off">
+                        </div>
                         <div class="home-form-row">
                             <div class="home-form-field">
                                 <label for="contactFirstName">First Name</label>
-                                <input id="contactFirstName" name="first_name" type="text" placeholder="John" autocomplete="given-name">
+                                <input id="contactFirstName" name="first_name" type="text" placeholder="John" autocomplete="given-name" maxlength="80" required>
                             </div>
                             <div class="home-form-field">
                                 <label for="contactLastName">Last Name</label>
-                                <input id="contactLastName" name="last_name" type="text" placeholder="Doe" autocomplete="family-name">
+                                <input id="contactLastName" name="last_name" type="text" placeholder="Doe" autocomplete="family-name" maxlength="80" required>
                             </div>
                         </div>
-
                         <div class="home-form-field">
                             <label for="contactEmailInput">Email</label>
-                            <input id="contactEmailInput" name="email" type="email" placeholder="example@mail.com" autocomplete="email">
+                            <input id="contactEmailInput" name="email" type="email" placeholder="example@mail.com" autocomplete="email" maxlength="254" required>
                         </div>
-
                         <div class="home-form-field">
                             <label for="contactMessage">Message</label>
-                            <textarea id="contactMessage" name="message" rows="5" placeholder="Enter your message"></textarea>
+                            <textarea id="contactMessage" name="message" rows="5" placeholder="Enter your message" maxlength="3000" required></textarea>
                         </div>
-
+                        <p id="homeContactStatus" class="home-contact-status" role="status" aria-live="polite"></p>
                         <button class="home-contact-submit" type="submit">Submit <span aria-hidden="true">✦</span></button>
                     </form>
                 </div>
@@ -210,13 +227,13 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
         <div class="login-panel">
             <div class="brand-lockup">
                 <img class="brand-logo" src="assets/school-logo.png" alt="<?= EASYSCHED_SCHOOL ?> seal">
-                <div><strong>EasySched</strong><span><?= EASYSCHED_SCHOOL ?></span></div>
+                <div><strong><?= EASYSCHED_SCHOOL ?></strong><span>EasySched</span></div>
                 <button class="button button-ghost login-home-button" id="backToHomeButton" type="button">Home</button>
             </div>
             <p class="eyebrow">Academic scheduling workspace</p>
             <h1 id="loginTitle">Sign in to manage schedules</h1>
             <p class="muted">Secure server sessions, conflict-aware generation, and a published timetable your faculty can trust.</p>
-            <form id="loginForm" novalidate>
+            <form id="loginForm" method="post" novalidate>
                 <div class="field">
                     <label for="loginUsername">Username</label>
                     <input id="loginUsername" name="username" autocomplete="username" required maxlength="80" spellcheck="false">
@@ -250,7 +267,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
             <p class="eyebrow">Enrollment access request</p>
             <h1>Request a student account</h1>
             <p class="muted">Fill in your student details. An administrator approves the request before your first sign-in.</p>
-            <form id="registrationForm" novalidate>
+            <form id="registrationForm" method="post" novalidate>
                 <div class="form-grid">
                     <div class="field"><label for="registrationFirstName">First name</label><input id="registrationFirstName" required maxlength="80" autocomplete="given-name"></div>
                     <div class="field"><label for="registrationMiddleName">Middle name <span class="muted"></span></label><input id="registrationMiddleName" maxlength="80" autocomplete="additional-name"></div>
@@ -283,7 +300,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
             <p class="eyebrow">Account recovery</p>
             <h1>Reset your password</h1>
             <p class="muted">We send a one-time code to the email address on file for the account.</p>
-            <form id="forgotPasswordForm" novalidate>
+            <form id="forgotPasswordForm" method="post" novalidate>
                 <div class="field">
                     <label for="resetAccount">Username or email</label>
                     <div class="field-with-action">
@@ -319,7 +336,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
         <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
             <div class="brand-lockup">
                 <img class="brand-logo" src="assets/school-logo.png" alt="<?= EASYSCHED_SCHOOL ?> seal">
-                <div><strong>EasySched</strong><span><?= EASYSCHED_SCHOOL ?></span></div>
+                <div><strong><?= EASYSCHED_SCHOOL ?></strong></div>
             </div>
             <div class="user-card">
                 <div class="avatar" id="userAvatar" aria-hidden="true">A</div>
@@ -327,7 +344,13 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
             </div>
             <p class="nav-label">Workspace</p>
             <ul class="nav-list" id="navList"></ul>
-            <div class="sidebar-footer"><span class="status-dot"></span><span>Local SQLite</span></div>
+            <div class="sidebar-footer">
+                <span>Powered by</span>
+                <button class="sidebar-footer-brand" id="brandPopupTrigger" type="button" aria-haspopup="dialog" aria-controls="brandPopup">
+                    <img class="sidebar-footer-logo" src="assets/LOGO%20ES.png" alt="">
+                    <span>EasySched</span>
+                </button>
+            </div>
         </aside>
 
         <main class="main-shell" id="mainContent">
@@ -352,30 +375,34 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
 
             <div class="page-container">
                 <section class="page" id="page-dashboard" data-page="dashboard" aria-labelledby="dashboardHeading">
-                    <div class="page-heading">
-                        <div><p class="eyebrow"></p><h2 id="dashboardHeading">Scheduling overview</h2><p class="muted">A live view of the active academic term.</p><span class="active-term-label" id="activeTermLabel"></span></div>
-                        <div class="page-heading-actions"><button class="button button-primary manage-only" id="dashboardGenerateButton" type="button"><?= easysched_icon('sparkle', '15') ?>Generate schedule</button></div>
+                    <div class="dashboard-hero">
+                        <img class="dashboard-hero-image" src="assets/command-center-banner.jpg" alt="" aria-hidden="true">
+                        <div class="dashboard-hero-copy">
+                            <p class="eyebrow">Overview</p>
+                            <h2 id="dashboardHeading">Command center</h2>
+                            <p>Manage classes, rooms, and academic resources — all in one place.</p>
+                            <div class="dashboard-hero-term"><span>Current term:</span><strong id="activeTermLabel"></strong></div>
+                        </div>
+                        <div class="dashboard-hero-actions"><button class="button button-primary manage-only" id="dashboardGenerateButton" type="button"><?= easysched_icon('sparkle', '15') ?>Auto generate</button></div>
                     </div>
                     <div class="metric-grid" id="metricGrid"></div>
-                    <div class="dashboard-grid">
-                        <article class="panel panel-large">
-                            <div class="panel-heading"><div><p class="eyebrow">Latest publication</p><h3>Schedule health</h3></div><span class="badge" id="scheduleHealthBadge">No schedule</span></div>
-                            <div id="dashboardHealth" class="health-list"></div>
+                    <div class="dashboard-lower-grid">
+                        <article class="panel dashboard-upcoming-panel">
+                            <div class="panel-heading"><div><p class="eyebrow">Next on the calendar</p><h3>Upcoming classes</h3><p class="dashboard-panel-note">Classes in the published timetable</p></div><button class="button button-ghost" data-navigate="schedules" type="button">Open schedule</button></div>
+                            <div class="table-wrap">
+                                <table class="data-table compact">
+                                    <thead><tr><th>Time</th><th>Subject</th><th>Section</th><th>Room</th><th>Instructor</th></tr></thead>
+                                    <tbody id="upcomingBody"></tbody>
+                                </table>
+                            </div>
                         </article>
-                        <article class="panel">
-                            <div class="panel-heading"><div><p class="eyebrow">At a glance</p><h3>Generation record</h3></div></div>
-                            <div id="runSummary" class="summary-list"></div>
-                        </article>
+                        <aside class="dashboard-side-panels">
+                            <article class="panel dashboard-quick-panel">
+                                <div class="panel-heading"><div><p class="eyebrow">Workspace</p><h3>Quick actions</h3><p class="dashboard-panel-note">Jump to a frequently used feature</p></div></div>
+                                <div class="dashboard-quick-actions" id="dashboardQuickActions"></div>
+                            </article>
+                        </aside>
                     </div>
-                    <article class="panel">
-                        <div class="panel-heading"><div><p class="eyebrow">Next on the calendar</p><h3>Upcoming classes</h3></div><button class="button button-ghost" data-navigate="schedules" type="button">Open schedule</button></div>
-                        <div class="table-wrap">
-                            <table class="data-table compact">
-                                <thead><tr><th>Time</th><th>Subject</th><th>Section</th><th>Room</th><th>Instructor</th></tr></thead>
-                                <tbody id="upcomingBody"></tbody>
-                            </table>
-                        </div>
-                    </article>
                 </section>
 
                 <section class="page" id="page-schedules" data-page="schedules" aria-labelledby="schedulesHeading" hidden>
@@ -384,18 +411,25 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                         <div><strong><?= EASYSCHED_SCHOOL ?></strong><span id="printMeta">Weekly class schedule</span></div>
                     </div>
                     <div class="page-heading">
-                        <div><p class="eyebrow"></p><h2 id="schedulesHeading">Weekly schedule</h2><p class="muted">Filter by the audience you need to answer for.</p><span class="active-term-label" id="scheduleTermLabel"></span></div>
+                        <div><p class="eyebrow"></p><h2 id="schedulesHeading">Weekly schedule</h2><p class="muted">Day view shows every class in its time slot. Week view groups classes that start at the same time.</p><span class="active-term-label" id="scheduleTermLabel"></span></div>
                         <div class="page-heading-actions">
                             <button class="button button-ghost" id="printButton" type="button"><?= easysched_icon('printer', '15') ?>Print</button>
                             <button class="button button-secondary" id="exportButton" type="button"><?= easysched_icon('download', '15') ?>Export CSV</button>
-                            <button class="button button-primary manage-only" id="generateButton" type="button"><?= easysched_icon('sparkle', '15') ?>Generate schedule</button>
+                            <button class="button button-secondary manage-only" id="addScheduleButton" type="button">Add class</button>
+                            <button class="button button-secondary manage-only" id="manualGenerateButton" type="button"><?= easysched_icon('list', '15') ?>Manual generate</button>
+                            <button class="button button-primary manage-only" id="generateButton" type="button"><?= easysched_icon('sparkle', '15') ?>Auto generate</button>
                         </div>
                     </div>
                     <div class="filter-bar">
-                        <label class="field-inline">View<select id="scheduleViewFilter"><option value="all">All classes</option><option value="section">By section</option><option value="instructor">By instructor</option><option value="room">By room</option></select></label>
+                        <label class="field-inline">View<select id="scheduleViewFilter"><option value="all">All classes</option><option value="section">By section</option><option value="instructor">By instructor</option><option value="room">By room</option><option value="room_type">By room type</option></select></label>
                         <label class="field-inline" id="scheduleFilterValueWrap">Filter<select id="scheduleFilterValue"><option value="all">All</option></select></label>
+                        <div class="calendar-view-control" role="group" aria-label="Timetable layout">
+                            <button class="calendar-view-button is-active" id="calendarWeekView" type="button" aria-pressed="true">Week</button>
+                            <button class="calendar-view-button" id="calendarDayView" type="button" aria-pressed="false">Day</button>
+                        </div>
+                        <label class="field-inline calendar-day-filter" id="calendarDayFilterWrap" hidden>Day<select id="calendarDayFilter" aria-label="Choose timetable day"></select></label>
                         <span class="filter-spacer"></span>
-                        <span class="legend"><span class="legend-dot lecture"></span>Lecture <span class="legend-dot lab"></span>Laboratory <span class="legend-dot other"></span>Other</span>
+                        <span class="legend"><span class="legend-dot lecture"></span>Lecture <span class="legend-dot lab"></span>Laboratory <span class="legend-dot other"></span>Special</span>
                     </div>
                     <div class="calendar-panel"><div class="calendar-grid" id="calendarGrid"></div></div>
                     <article class="panel schedule-table-panel">
@@ -418,7 +452,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                     <div class="page-heading"><div><p class="eyebrow"></p><h2 id="roomRequestsHeading">Room requests</h2><p class="muted">Request a room and time for an assigned class. An administrator must approve it before it is added to the timetable.</p></div></div>
                     <article class="panel instructor-only" id="scheduleRequestPanel" hidden>
                         <div class="panel-heading"><div><p class="eyebrow">Instructor request</p><h3>Request a room and time</h3></div></div>
-                        <form id="scheduleRequestForm" class="form-grid">
+                        <form id="scheduleRequestForm" class="form-grid" method="post">
                             <div class="field"><label for="requestOffering">Class assignment</label><select id="requestOffering" required></select></div>
                             <div class="field"><label for="requestDate">Exact date</label><input id="requestDate" type="date" required></div>
                             <div class="field"><label for="requestStartTime">Start time</label><div class="time-input-group"><input id="requestStartTime" value="08:00" inputmode="numeric" maxlength="5" pattern="[0-9]{2}:[0-9]{2}" placeholder="HH:MM" required><select id="requestStartPeriod" aria-label="Start time period"><option>AM</option><option>PM</option></select></div></div>
@@ -437,19 +471,34 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                 </section>
 
                 <section class="page" id="page-data" data-page="data" aria-labelledby="dataHeading" hidden>
-                    <div class="page-heading"><div><p class="eyebrow"></p><h2 id="dataHeading">Academic setup</h2><p class="muted">Maintain the resources the scheduler solves against.</p></div></div>
+                    <div class="page-heading"><div><p class="eyebrow"></p><h2 id="dataHeading">Academic setup</h2><p class="muted">Manage subject names and course codes, plus the resources used by the scheduler.</p></div></div>
                     <div class="data-tabs" role="tablist" aria-label="Master data types">
-                        <button class="tab-button active" role="tab" aria-selected="true" data-data-tab="rooms" type="button">Rooms</button>
+                        <button class="tab-button" role="tab" aria-selected="false" data-data-tab="rooms" type="button">Rooms</button>
                         <button class="tab-button" role="tab" aria-selected="false" data-data-tab="instructors" type="button">Faculty</button>
-                        <button class="tab-button" role="tab" aria-selected="false" data-data-tab="subjects" type="button">Subjects</button>
+                        <button class="tab-button active" role="tab" aria-selected="true" data-data-tab="subjects" type="button">Subject &amp; course codes</button>
                         <button class="tab-button" role="tab" aria-selected="false" data-data-tab="programs" type="button">Programs</button>
                         <button class="tab-button" role="tab" aria-selected="false" data-data-tab="sections" type="button">Sections</button>
                         <button class="tab-button" role="tab" aria-selected="false" data-data-tab="offerings" type="button">Class assignments</button>
                         <button class="tab-button admin-only" role="tab" aria-selected="false" data-data-tab="users" type="button">Users</button>
                     </div>
                     <article class="panel">
-                        <div class="panel-heading"><div><p class="eyebrow">Current term records</p><h3 id="dataTabTitle">Rooms</h3></div><button class="button button-primary manage-only" id="addRecordButton" type="button">Add record</button></div>
+                        <div class="panel-heading"><div><p class="eyebrow" id="dataTabEyebrow">Subject &amp; course management</p><h3 id="dataTabTitle">Subject &amp; Course Code</h3></div><button class="button button-primary manage-only" id="addRecordButton" type="button">+ Add Subject</button></div>
+                        <div class="subject-management-tools" id="subjectManagementTools">
+                            <label class="sr-only" for="subjectSearch">Search subject or course code</label>
+                            <input id="subjectSearch" type="search" placeholder="Search subject or course code" autocomplete="off">
+                            <span id="subjectResultCount" class="muted" aria-live="polite"></span>
+                        </div>
                         <div class="table-wrap"><table class="data-table"><thead id="dataTableHead"></thead><tbody id="dataTableBody"></tbody></table></div>
+                    </article>
+                    <article class="panel admin-only" id="offeringImportPanel" hidden>
+                        <div class="panel-heading"><div><p class="eyebrow">Transfer assignments</p><h3>Move assignments between databases</h3></div></div>
+                        <p class="muted">On the updated local app, download a fresh active-term assignments CSV. Then open Railway's deployed app and upload that file here. The CSV includes instructor names to match faculty if employee numbers differ. Only missing assignments are added; existing Railway assignments are never changed. Required terms, subjects, sections, and instructors must exist in the destination.</p>
+                        <form id="offeringImportForm" class="form-grid" method="post" action="api.php?action=import_offerings" enctype="multipart/form-data">
+                            <input type="hidden" name="csrf" value="<?= htmlspecialchars((string) ($_SESSION['csrf'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
+                            <div class="field full"><label for="offeringImportFile">Class assignment CSV</label><input id="offeringImportFile" name="csv_file" type="file" accept=".csv,text/csv" required></div>
+                            <div class="field full"><div class="row-actions"><button class="button button-secondary" id="offeringExportButton" type="button">Download this database's assignments</button><button class="button button-secondary" id="offeringImportTemplate" type="button">Download blank template</button><button class="button button-primary" id="offeringImportSubmit" type="submit">Add missing assignments</button></div></div>
+                            <div class="field full"><p id="offeringImportStatus" class="muted" role="status" aria-live="polite"></p></div>
+                        </form>
                     </article>
                     <article class="panel admin-only" id="registrationReviewPanel" hidden>
                         <div class="panel-heading"><div><p class="eyebrow">Enrollment review</p><h3>Pending student registrations</h3></div><span class="badge badge-warning" id="pendingRegistrationCount">0 pending</span></div>
@@ -479,35 +528,74 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                     </div>
                 </section>
 
+                <section class="page" id="page-profile" data-page="profile" aria-labelledby="profileHeading" hidden>
+                    <div class="page-heading">
+                        <div><p class="eyebrow">Account</p><h2 id="profileHeading">Profile</h2><p class="muted">Review and update your information.</p></div>
+                    </div>
+                    <article class="panel profile-verification">
+                        <div class="profile-verification-copy">
+                            <p class="eyebrow">Verify information</p>
+                            <p>Is the information correct? Please make necessary changes if needed.</p>
+                            <span id="profileVerificationStatus" role="status"></span>
+                        </div>
+                        <label class="profile-verify-control"><input id="profileVerified" type="checkbox"><span>I verify that the information is correct</span></label>
+                    </article>
+                    <div class="profile-sections">
+                        <article class="panel profile-section" data-profile-section="basics">
+                            <div class="panel-heading"><div><h3>Basic Information</h3></div><button class="button button-ghost button-small" type="button" data-profile-edit="basics">Edit</button></div>
+                            <div id="profileBasicsContent"></div>
+                        </article>
+                        <article class="panel profile-section" data-profile-section="address">
+                            <div class="panel-heading"><div><h3>Home Address</h3></div><button class="button button-ghost button-small" type="button" data-profile-edit="address">Edit</button></div>
+                            <div id="profileAddressContent"></div>
+                        </article>
+                        <article class="panel profile-section" data-profile-section="parents">
+                            <div class="panel-heading"><div><h3>Parents Information</h3></div><button class="button button-ghost button-small" type="button" data-profile-edit="parents">Edit</button></div>
+                            <div id="profileParentsContent"></div>
+                        </article>
+                    </div>
+                </section>
+
                 <section class="page" id="page-settings" data-page="settings" aria-labelledby="settingsHeading" hidden>
                     <div class="page-heading"><div><p class="eyebrow"></p><h2 id="settingsHeading">Settings</h2><p class="muted">Term configuration and account security.</p></div></div>
                     <div class="settings-grid">
                         <article class="panel manage-only">
                             <div class="panel-heading"><div><p class="eyebrow">Academic period</p><h3>Active term</h3></div></div>
-                            <form id="settingsForm">
+                            <form id="settingsForm" method="post">
                                 <div class="field"><label for="academicYear">Academic year</label><input id="academicYear" pattern="20[0-9]{2}-20[0-9]{2}" required placeholder="2026-2027"><span class="field-hint">Format: 2026-2027.</span></div>
                                 <div class="field"><label for="semester">Semester</label><select id="semester"><option>First Semester</option><option>Second Semester</option></select></div>
                                 <button class="button button-primary" type="submit">Save term</button>
                             </form>
                         </article>
-                        <article class="panel">
-                            <div class="panel-heading"><div><p class="eyebrow">Account</p><h3>Change password</h3></div></div>
-                            <form id="passwordForm">
-                                <div class="field"><label for="currentPassword">Current password</label><input id="currentPassword" type="password" required autocomplete="current-password"></div>
-                                <div class="field"><label for="newPassword">New password</label><input id="newPassword" type="password" minlength="10" required autocomplete="new-password"><span class="field-hint">At least 10 characters.</span></div>
-                                <div class="field"><label for="confirmPassword">Confirm new password</label><input id="confirmPassword" type="password" minlength="10" required autocomplete="new-password"></div>
-                                <button class="button button-primary" type="submit">Change password</button>
-                            </form>
-                        </article>
+                        <section class="settings-account" aria-labelledby="settingsAccountHeading">
+                            <div class="settings-section-heading">
+                                <div><p class="eyebrow">Account</p><h3 id="settingsAccountHeading">Account security</h3></div>
+                                <p class="muted">Manage the email address and password used to access your account.</p>
+                            </div>
+                            <div class="settings-account-grid">
+                                <article class="panel">
+                                    <div class="panel-heading"><div><h4>Email address</h4></div></div>
+                                    <p class="muted settings-current-email">Current email: <strong id="accountEmailValue">Not provided</strong></p>
+                                    <form id="emailChangeForm" method="post">
+                                        <div class="field"><label for="newEmail">New email address</label><input id="newEmail" type="email" maxlength="180" required autocomplete="email"></div>
+                                        <button class="button button-ghost" id="requestEmailOtpButton" type="button">Send verification code</button>
+                                        <div class="field"><label for="emailChangeOtp">Verification code</label><input id="emailChangeOtp" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code"><span class="field-hint">Sent to your new email address. Expires after 10 minutes.</span></div>
+                                        <button class="button button-primary" type="submit">Verify and change email</button>
+                                        <p id="emailChangeStatus" class="field-hint" role="status" aria-live="polite"></p>
+                                    </form>
+                                </article>
+                                <article class="panel">
+                                    <div class="panel-heading"><div><h4>Change password</h4></div></div>
+                                    <form id="passwordForm" method="post">
+                                        <div class="field"><label for="currentPassword">Current password</label><input id="currentPassword" type="password" required autocomplete="current-password"></div>
+                                        <div class="field"><label for="newPassword">New password</label><input id="newPassword" type="password" minlength="10" required autocomplete="new-password"><span class="field-hint">Use at least 10 characters.</span></div>
+                                        <div class="field"><label for="confirmPassword">Confirm new password</label><input id="confirmPassword" type="password" minlength="10" required autocomplete="new-password"></div>
+                                        <button class="button button-primary" type="submit">Change password</button>
+                                    </form>
+                                </article>
+                            </div>
+                        </section>
                     </div>
-                    <article class="panel security-note">
-                        <div class="security-icon"><?= easysched_icon('shield', '22') ?></div>
-                        <div>
-                            <p class="eyebrow">Deployment boundary</p>
-                            <h3>Defense build security posture</h3>
-                            <p>This build uses server-side sessions, password hashes, CSRF tokens, prepared SQLite queries, role checks, audit logs, and a restrictive content security policy. Use HTTPS and a production database before handling real student records.</p>
-                        </div>
-                    </article>
                 </section>
 
                 <section class="page help-page" id="page-help" data-page="help" aria-labelledby="helpHeading" hidden>
@@ -528,13 +616,20 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                 <div><p class="eyebrow" id="modalEyebrow">Record</p><h2 id="modalTitle">Edit record</h2></div>
                 <button class="icon-button" id="modalCloseButton" type="button" aria-label="Close dialog"><?= easysched_icon('close', '18') ?></button>
             </div>
-            <form id="modalForm">
+            <form id="modalForm" method="post">
                 <div class="modal-body" id="modalBody"></div>
                 <div class="modal-footer">
                     <button class="button button-ghost" id="modalCancelButton" type="button">Cancel</button>
                     <button class="button button-primary" type="submit">Save</button>
                 </div>
             </form>
+        </section>
+    </div>
+
+    <div class="brand-popup" id="brandPopup" hidden>
+        <section class="brand-popup-card" role="dialog" aria-modal="true" aria-label="EasySched information">
+            <button class="icon-button brand-popup-close" id="brandPopupClose" type="button" aria-label="Close EasySched information"><?= easysched_icon('close', '18') ?></button>
+            <img class="brand-popup-image" src="assets/easysched-splash.webp" alt="Powered by EasySched. Automated Scheduling System. More About Us. App Version 1.0. Copyright 2026 Easy Sched.">
         </section>
     </div>
 

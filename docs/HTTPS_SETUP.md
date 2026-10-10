@@ -29,14 +29,19 @@ SetEnv EASYSCHED_FORCE_HTTPS "1"
 
 ## Reverse-proxy hosting
 
-When Render, Railway, Cloudflare, Nginx, or another trusted reverse proxy terminates HTTPS, configure both variables on the PHP server:
+When Render, Railway, Cloudflare, Nginx, or another trusted reverse proxy terminates HTTPS, configure these variables on the PHP server:
 
 ```text
 EASYSCHED_FORCE_HTTPS=1
 EASYSCHED_TRUST_PROXY=1
+EASYSCHED_PUBLIC_URL=https://www.easysched.tech
 ```
 
-Only enable `EASYSCHED_TRUST_PROXY` when requests can reach PHP exclusively through a trusted proxy that replaces `X-Forwarded-Proto`. Do not enable it on a directly exposed server where clients can supply that header themselves.
+Set `EASYSCHED_PUBLIC_URL` to the canonical public HTTPS origin (scheme and hostname only; no path or nonstandard port). It is used for HTTPS redirects so an internal application port such as Railway's `8080` is never exposed in browser redirects. `EASYSCHED_TRUST_PROXY` recognizes the first value of `X-Forwarded-Proto`; the proxy must replace that header. Only enable proxy trust when requests can reach PHP exclusively through a trusted proxy. Do not enable it on a directly exposed server where clients can supply that header themselves.
+
+On Railway, add the variables under the EasySched web service's **Variables**, not the PostgreSQL service, then redeploy the service.
+
+The Docker image also disables Apache's automatic trailing-slash redirect specifically for `/data`. That path is both an application route and a private session-storage directory in older deployments; without this setting, Apache can redirect to its internal Railway port before the application rewrite runs. Deploy the updated Dockerfile to apply the fix.
 
 ## Result
 

@@ -1,6 +1,6 @@
 # EasySched Defense Build
 
-EasySched is a complete, local class scheduling application for New Sinai School and Colleges Sta. Rosa, Inc. This defense build uses PHP 8.2, SQLite, PDO, server-side sessions, and a browser interface that can be hosted by XAMPP without a separate database server.
+EasySched is a complete class scheduling application for New Sinai School and Colleges Sta. Rosa, Inc. This defense build uses PHP 8.2, PDO, server-side sessions, and a browser interface that can be hosted by XAMPP. PostgreSQL is required for all application data.
 
 ## What is included
 
@@ -10,43 +10,32 @@ EasySched is a complete, local class scheduling application for New Sinai School
 - Role-based accounts: `admin`, `scheduler`, `instructor`, and `student`.
 - Server-side password hashes, session cookies, CSRF protection, prepared SQL statements, audit logs, security headers, and restrictive CSP.
 - Login protection with independent IP/account throttles, exponential backoff, generic failure messages, failed-login audit events, and an adaptive arithmetic challenge after repeated failures.
-- Weekly calendar, filters, print view, CSV export, master-data forms, reports, and account password changes.
+- Weekly calendar, filters, print view, CSV export, master-data forms, validated CSV import of class assignments, reports, manual scheduling of required or extra meetings, account password changes, and OTP-verified email changes.
 
-This build runs on localhost and stores its records in `data/easysched.sqlite`. No online hosting account or cloud database is required. Existing accounts, scheduling, reports, and exports work locally. Email verification and password recovery are optional internet-connected features; see [`docs/EMAIL_OTP_SETUP.md`](docs/EMAIL_OTP_SETUP.md).
+Set `EASYSCHED_DATABASE_URL` to a PostgreSQL connection URL in the server environment or private `.env` file. Email verification and password recovery are optional internet-connected features; see [`docs/EMAIL_OTP_SETUP.md`](docs/EMAIL_OTP_SETUP.md).
 
 ## Run with XAMPP
 
-1. Install XAMPP with Apache and PHP 8.2 or newer. Confirm that `pdo_sqlite` is enabled in `php.ini`.
+1. Install XAMPP with Apache and PHP 8.2 or newer. Enable `pdo_pgsql` in `php.ini`.
 2. Copy this folder to `C:\xampp\htdocs\EasySched-Defense` (or another Apache document-root folder).
 3. Start Apache in the XAMPP Control Panel.
 4. Open `http://localhost/EasySched-Defense/`.
-5. The first request creates `data/easysched.sqlite` and inserts the demonstration data. The database directory is denied by `data/.htaccess` when Apache honors `.htaccess` files.
+5. The first request applies the PostgreSQL schema, installs the cleaned subject/course catalog, and inserts other demonstration data only when the database is empty. Existing subject-linked class assignments are archived as inactive so historical schedule references remain intact.
 6. Sign in with one of the accounts below, then change the password before using real records.
+
+The Apache rewrite rules in `.htaccess` let you open the home page at `/`, sign-in at `/login`, registration at `/register`, password recovery at `/forgot-password`, and workspace sections at paths such as `/dashboard`, `/schedules`, `/data`, `/reports`, `/profile`, `/settings`, and `/help`. These paths are relative to the folder where EasySched is installed. Apache must allow `.htaccess` overrides and have `mod_rewrite` enabled for direct links and page refreshes to work.
 
 For a quick local-only run without Apache, from this folder use:
 
 ```text
 C:\xampp\php\php.exe -S 127.0.0.1:8080 -t .
-```
-
-Then open `http://127.0.0.1:8080/`. The PHP development server does not apply `.htaccess`, so use it only on the local machine and never expose it to a network.
-
-## Demonstration accounts
-
-| Role | Username | Initial password | Scope |
-| --- | --- | --- | --- |
-| Administrator | `admin` | `Admin123!` | Academic master data, terms, user management, generation, edits, reports |
-| Scheduler | `scheduler` | `Scheduler123!` | Academic master data (excluding users), generation, schedule edits, reports |
-| Instructor | `instructor` | `Instructor123!` | Published classes assigned to the instructor |
-| Student | `student` | `Student123!` | Published classes for the student's section |
-
-These are seeded demonstration credentials, not production credentials. The current interface supports password changes for the signed-in account. For production, create unique accounts and remove or disable the seed accounts after provisioning.
+Never import old plaintext passwords. Provision new accounts and set password hashes through the application or a controlled server-side script.
 
 ## Typical defense demonstration
 
 1. Sign in as `admin` and show the dashboard metrics.
-2. Open **Academic setup** and explain the normalized resources: programs, sections, subjects, faculty, rooms, and course offerings.
-3. Generate the active term. The result shows assigned tasks, search nodes, warnings, problems, and the hard constraints checked.
+2. Open **Academic setup** to search and manage the cleaned subject/course-code catalog, then explain the related programs, sections, faculty, rooms, and class assignments. Administrators can also import validated class assignments from CSV; see [`docs/ONLINE_DEPLOYMENT.md`](docs/ONLINE_DEPLOYMENT.md).
+3. Use **Auto generate** to build the full active-term timetable, or **Manual generate** to select programs, sections, subjects, and/or instructors. Manual generation replaces matching offerings and preserves all other published classes; selections across filter groups must all match. The result shows assignments, search nodes, warnings, problems, and the hard constraints checked.
 4. Open **Weekly schedule**, filter by section/instructor/room, then print or export CSV.
 5. Attempt a conflicting manual edit. The server rejects it and leaves the published entry unchanged.
 6. Sign in as `instructor` and `student` to demonstrate server-side scope restrictions. Changing an identifier in a request does not broaden either role's schedule view.
@@ -54,7 +43,7 @@ These are seeded demonstration credentials, not production credentials. The curr
 
 ## Architecture
 
-`index.php` is the server-rendered shell. `script.js` requests JSON from `api.php` and renders pages without a frontend framework. `db.php` opens SQLite, enables foreign keys/WAL/busy timeout, applies `schema.sql`, and seeds an empty database. `api.php` contains authentication, authorization, validation, CRUD, generation, manual-edit validation, export, and audit logging.
+`index.php` is the server-rendered shell. `script.js` requests JSON from `api.php` and renders pages without a frontend framework. `db.php` requires PostgreSQL from `EASYSCHED_DATABASE_URL`, applies `schema.postgres.sql`, and seeds an empty database. `api.php` contains authentication, authorization, validation, CRUD, generation, manual-edit validation, export, and audit logging.
 
 The core data model is:
 
@@ -64,6 +53,8 @@ programs ------/                         \        instructors
 rooms + time_slots -> schedule_entries -> schedule_occupancy
 users -> audit_logs; schedule_runs preserve publication history
 ```
+
+Academic setup opens on the subject/course-code catalog. Class assignment subject choices display subject names only. Subject names are unique after case and formatting normalization, while course codes may be shared by genuinely different subjects. Catalog replacement archives prior class assignments as inactive to retain historical schedule references.
 
 The database schema uses foreign keys, check constraints, unique keys, indexes, and triggers. The occupancy table has a unique key on `(run_id, resource_type, resource_id, day_of_week, slot_id)`, which is the final database-level guard against double booking a room, instructor, or section in a published run.
 
@@ -82,22 +73,16 @@ Instructor, room, and section availability can be stored in `instructor_availabi
 - Every protected action checks the session role on the server. UI hiding is not the authorization boundary.
 - CSP, frame, MIME-sniffing, referrer, permissions, and no-cache headers are sent by the application.
 - CSV export prefixes formula-like values to reduce spreadsheet injection risk.
-- Under Apache, `data/.htaccess` blocks direct download of the SQLite file. Also deny the `data` directory at the reverse proxy/web-server layer in production.
+- Under Apache, deny the `data` directory at the reverse proxy/web-server layer in production.
 
-Session protection and security headers remain enabled on localhost. Keep `data/easysched.sqlite` out of source control.
+Session protection and security headers remain enabled on localhost. Keep `.env` out of source control.
 
 
 ## Database and migration
 
-The schema is created idempotently from `schema.sql`; existing rows are not deleted. `CREATE TABLE IF NOT EXISTS` does not alter older table definitions, so a pre-existing server database still needs a reviewed migration. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for a field mapping and staged import strategy for records that currently exist only in the old browser prototype/localStorage. Never import old plaintext passwords. Provision new accounts and set password hashes through the application or a controlled server-side script.
+The schema is created idempotently from `schema.postgres.sql`. PostgreSQL is the only supported database. The migration is complete, and prior PostgreSQL tables remain archived in a separate schema. Use `pg_dump` and test restoring it before maintenance. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for importing reviewed legacy browser data. Never import old plaintext passwords. Provision new accounts and set password hashes through the application or a controlled server-side script.
 
-Back up the SQLite file before maintenance:
-
-```text
-copy data\easysched.sqlite data\easysched.sqlite.bak
-```
-
-For a production backup, stop writes first or use SQLite's online backup tooling. Do not copy a live WAL database while it is being written without a consistent backup procedure.
+Use `pg_dump` and test restoring it before maintenance. See [`docs/MIGRATION.md`](docs/MIGRATION.md) for importing reviewed legacy browser data. Never import old plaintext passwords.
 
 ## Verification
 
@@ -108,20 +93,15 @@ C:\xampp\php\php.exe -l api.php
 C:\xampp\php\php.exe -l db.php
 C:\xampp\php\php.exe -l index.php
 node --check script.js
+C:\xampp\php\php.exe tests\postgres_database.php
 ```
 
-Run the HTTP smoke test after copying the folder or from this directory:
-
-```text
-powershell -ExecutionPolicy Bypass -File tests\smoke.ps1
-```
-
-The smoke test uses a temporary clean copy, starts PHP's local server, and checks authentication, CSRF, RBAC, user/master-data changes, generation, conflict rejection, scoped schedules, CSV export, failed-run preservation, and database occupancy integrity. It removes only its own temporary directory.
+The PostgreSQL check requires `EASYSCHED_DATABASE_URL` and verifies the cleaned catalog, subject add/edit/delete and normalization behavior, code/name uniqueness, generated IDs, and rollback behavior without leaving test rows behind.
 
 ## Known boundaries and next production steps
 
 - Time slots and availability tables are supported by the solver but do not yet have dedicated UI editors; configure them through a controlled SQL/admin workflow.
-- SQLite is appropriate for this local defense/demo deployment. Run one scheduling generation at a time.
+- PostgreSQL is the only supported database; run one scheduling generation at a time unless generation is serialized.
 - Add automated browser tests (Playwright), centralized monitoring, account recovery, and a formal data-retention policy before production use.
 
 ## Defense talking points

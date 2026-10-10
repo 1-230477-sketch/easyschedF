@@ -72,15 +72,15 @@ function easysched_env_string(string $key): string
 
 function easysched_contact_email(): string
 {
-    $email = easysched_env_string('EASYSCHED_EMAIL_FROM');
-    if ($email === '') {
-        $email = easysched_env_string('EASYSCHED_CONTACT_EMAIL');
-    }
+    $email = easysched_env_string('EASYSCHED_CONTACT_EMAIL');
     if ($email === '') {
         $email = easysched_env_string('CONTACT_EMAIL');
     }
     if ($email === '') {
         $email = easysched_env_string('MAIL_FROM');
+    }
+    if ($email === '') {
+        $email = easysched_env_string('EASYSCHED_EMAIL_FROM');
     }
     if ($email === '') {
         $email = easysched_env_string('EASYSCHED_SMTP_USERNAME');
@@ -100,19 +100,77 @@ function easysched_is_https(): bool
     if ((string) ($_SERVER['SERVER_PORT'] ?? '') === '443') {
         return true;
     }
+    if (filter_var(easysched_env_string('EASYSCHED_TRUST_PROXY'), FILTER_VALIDATE_BOOLEAN)) {
+        $forwardedProtocols = explode(',', (string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+        return strtolower(trim($forwardedProtocols[0] ?? '')) === 'https';
+    }
     return false;
+}
+
+function easysched_public_https_url(): string
+{
+    $publicUrl = trim(easysched_env_string('EASYSCHED_PUBLIC_URL'));
+    if ($publicUrl === '') {
+        return '';
+    }
+    $parts = parse_url($publicUrl);
+    if (
+        !is_array($parts)
+        || strtolower((string) ($parts['scheme'] ?? '')) !== 'https'
+        || empty($parts['host'])
+        || isset($parts['user'])
+        || isset($parts['pass'])
+        || isset($parts['query'])
+        || isset($parts['fragment'])
+        || (isset($parts['path']) && $parts['path'] !== '' && $parts['path'] !== '/')
+        || (isset($parts['port']) && (int) $parts['port'] !== 443)
+    ) {
+        throw new RuntimeException('EASYSCHED_PUBLIC_URL must be an HTTPS origin without a path or nonstandard port.');
+    }
+    $host = (string) $parts['host'];
+    if (!preg_match('/\A(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[A-Fa-f0-9:.]+\])\z/', $host)) {
+        throw new RuntimeException('EASYSCHED_PUBLIC_URL contains an invalid host.');
+    }
+    return 'https://' . $host;
+}
+
+function easysched_enforce_https(): void
+{
+    if (!filter_var(easysched_env_string('EASYSCHED_FORCE_HTTPS'), FILTER_VALIDATE_BOOLEAN) || easysched_is_https()) {
+        return;
+    }
+
+    $host = (string) ($_SERVER['HTTP_HOST'] ?? '');
+    $requestUri = (string) ($_SERVER['REQUEST_URI'] ?? '/');
+    $publicUrl = easysched_public_https_url();
+    if (
+        ($publicUrl === '' && !preg_match('/\A(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[A-Fa-f0-9:.]+\])(?::[0-9]{1,5})?\z/', $host))
+        || !str_starts_with($requestUri, '/')
+        || str_starts_with($requestUri, '//')
+        || preg_match('/[\r\n]/', $requestUri)
+    ) {
+        throw new RuntimeException('Cannot safely redirect this request to HTTPS.');
+    }
+
+    header('Location: ' . ($publicUrl !== '' ? $publicUrl : 'https://' . $host) . $requestUri, true, 308);
+    exit;
 }
 
 function easysched_start_session(): void
 {
+    easysched_enforce_https();
     $secure = easysched_is_https();
-    $sessionPath = __DIR__ . DIRECTORY_SEPARATOR . 'data' . DIRECTORY_SEPARATOR . 'sessions';
-    if (!is_dir($sessionPath)) {
-        mkdir($sessionPath, 0770, true);
+    $configuredSessionPath = easysched_env_string('EASYSCHED_SESSION_PATH');
+    $sessionPath = $configuredSessionPath !== ''
+        ? $configuredSessionPath
+        : sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'easysched-sessions-' . substr(hash('sha256', __DIR__), 0, 12);
+    if (!is_dir($sessionPath) && !mkdir($sessionPath, 0770, true) && !is_dir($sessionPath)) {
+        throw new RuntimeException('Could not create the private session directory.');
     }
-    if (is_dir($sessionPath) && is_writable($sessionPath)) {
-        session_save_path($sessionPath);
+    if (!is_writable($sessionPath)) {
+        throw new RuntimeException('The private session directory is not writable.');
     }
+    session_save_path($sessionPath);
     ini_set('session.use_strict_mode', '1');
     ini_set('session.use_only_cookies', '1');
     ini_set('session.use_trans_sid', '0');
