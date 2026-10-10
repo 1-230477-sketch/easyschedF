@@ -218,7 +218,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
 
         <footer class="home-footer">
             <a class="home-brand" href="#homeTop"><img src="assets/school-logo.png" alt=""><span><strong>New Sinai School and Colleges</strong><small>Sta. Rosa, Inc.</small></span></a>
-            <nav aria-label="Footer navigation"><a href="#homeTop">Home</a><a href="#homeFeatures">Features</a><a href="#homeAbout">About</a><a href="#homeContact">Contact</a></nav>
+            <nav aria-label="Footer navigation"><a href="#homeTop">Home</a><a href="#homeFeatures">Features</a><a href="#homeAbout">About</a><a href="#homeContact">Contact</a><a href="legal.php?document=privacy">Privacy Policy</a><a href="legal.php?document=terms">Terms and Conditions</a><a href="legal.php?document=cookies">Cookies Policy</a></nav>
             <p>&copy; <?= date('Y') ?> New Sinai School and Colleges Sta. Rosa, Inc.</p>
         </footer>
     </main>
@@ -376,13 +376,12 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
             <div class="page-container">
                 <section class="page" id="page-dashboard" data-page="dashboard" aria-labelledby="dashboardHeading">
                     <div class="dashboard-hero">
-                        <img class="dashboard-hero-image" src="assets/command-center-banner.jpg" alt="" aria-hidden="true">
                         <div class="dashboard-hero-copy">
                             <p class="eyebrow">Overview</p>
                             <h2 id="dashboardHeading">Command center</h2>
                             <p>Manage classes, rooms, and academic resources — all in one place.</p>
-                            <div class="dashboard-hero-term"><span>Current term:</span><strong id="activeTermLabel"></strong></div>
                         </div>
+                        <div class="dashboard-hero-term"><span>Current term</span><strong id="activeTermLabel"></strong></div>
                         <div class="dashboard-hero-actions"><button class="button button-primary manage-only" id="dashboardGenerateButton" type="button"><?= easysched_icon('sparkle', '15') ?>Auto generate</button></div>
                     </div>
                     <div class="metric-grid" id="metricGrid"></div>
