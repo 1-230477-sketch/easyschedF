@@ -212,6 +212,14 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     entity_type TEXT,
     entity_id BIGINT,
     details_json TEXT NOT NULL DEFAULT '{}',
+    severity TEXT NOT NULL DEFAULT 'INFO' CHECK (severity IN ('INFO', 'WARNING', 'CRITICAL')),
+    outcome TEXT NOT NULL DEFAULT 'SUCCESS' CHECK (outcome IN ('SUCCESS', 'FAILURE', 'DENIED')),
+    request_path TEXT,
+    http_method TEXT,
+    source_ip INET,
+    user_agent TEXT,
+    correlation_id TEXT,
+    occurred_at_utc TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS system_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL);

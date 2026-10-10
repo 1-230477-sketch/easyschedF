@@ -1426,6 +1426,32 @@ kbd {
 .app-shell.dashboard-active #page-dashboard .data-table td { border-bottom-color: #e5eee6; color: #233f2e; }
 .app-shell.dashboard-active #page-dashboard .data-table .subline { color: #68806f; }
 .app-shell.dashboard-active #page-dashboard .data-table strong { color: #1d3c2b; }
+.audit-summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--s-3); margin-bottom: var(--s-4); }
+.audit-summary-card { display: grid; gap: 8px; min-height: 92px; padding: 16px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-xs); }
+.audit-summary-card span { color: var(--text-muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.audit-summary-card strong { color: var(--text); font-size: 28px; line-height: 1; }
+.audit-summary-card.audit-critical { border-color: var(--danger-line); background: var(--danger-soft); }
+.audit-panel { overflow: hidden; }
+.audit-filters { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s-3); padding: var(--s-4); border-bottom: 1px solid var(--border); }
+.audit-filters .field-inline { min-width: 125px; }
+.audit-filters .field-inline:nth-child(3) { min-width: 220px; flex: 1 1 220px; }
+.audit-status { min-height: 20px; margin: var(--s-3) var(--s-4) 0; color: var(--text-muted); font-size: 12px; }
+.audit-table-wrap { overflow-x: auto; }
+.audit-table { min-width: 900px; }
+.audit-table td, .audit-table th { white-space: nowrap; }
+.audit-badge { display: inline-flex; padding: 3px 7px; border-radius: var(--r-pill); font-size: 10px; font-weight: 800; letter-spacing: .04em; }
+.audit-info { background: var(--info-soft); color: var(--info); }
+.audit-warning { background: var(--warning-soft); color: var(--warning); }
+.audit-critical { color: var(--danger); }
+.audit-pagination { display: flex; align-items: center; justify-content: center; gap: var(--s-4); padding: var(--s-4); color: var(--text-muted); font-size: 12px; }
+.audit-detail-dialog { width: min(680px, calc(100% - 32px)); max-height: min(760px, calc(100vh - 32px)); padding: var(--s-5); border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg); }
+.audit-detail-dialog::backdrop { background: rgba(5, 25, 18, .62); }
+.audit-detail-dialog .panel-heading { margin-bottom: var(--s-4); }
+.audit-detail-content { overflow: auto; max-height: 560px; }
+.audit-detail-list { display: grid; grid-template-columns: minmax(130px, .4fr) minmax(0, 1fr); gap: 0; margin: 0; }
+.audit-detail-list dt, .audit-detail-list dd { margin: 0; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; overflow-wrap: anywhere; }
+.audit-detail-list dt { color: var(--text-muted); font-weight: 700; }
+.audit-detail-list dd { color: var(--text); }
 .app-shell.dashboard-active #page-dashboard .dashboard-upcoming-panel .data-table { table-layout: fixed; }
 .app-shell.dashboard-active #page-dashboard .dashboard-upcoming-panel .data-table th:nth-child(1),
 .app-shell.dashboard-active #page-dashboard .dashboard-upcoming-panel .data-table td:nth-child(1) { width: 20%; }
@@ -1938,6 +1964,16 @@ kbd {
   font-size: 11.5px;
   font-weight: 550;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+.calendar-time-start,
+.calendar-time-end {
+  display: block;
+  margin-top: 2px;
+}
+.calendar-time-divider {
+  display: none;
 }
 .calendar-head:first-child { z-index: 3; left: 0; padding-left: 12px; }
 .calendar-resize {
@@ -2136,6 +2172,7 @@ kbd {
 }
 .calendar-overlap > .calendar-overlap-breakdown {
   display: grid;
+  min-width: 0;
   justify-items: center;
   gap: 5px;
   width: 100%;
@@ -2144,10 +2181,15 @@ kbd {
 }
 .calendar-overlap-duration {
   display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-secondary);
   text-align: center;
   font-size: 12px;
   line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .calendar-overlap-duration strong {
   color: var(--schedule-overlap-ink);
@@ -2156,9 +2198,14 @@ kbd {
 }
 .calendar-overlap > .calendar-overlap-action {
   display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-muted);
   text-align: center;
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .schedule-detail-list { display: grid; gap: var(--s-3); }
 .schedule-detail-filters {
@@ -2658,7 +2705,7 @@ body.modal-open { overflow: hidden; }
   .filter-bar { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .calendar-grid { min-width: 0; grid-template-columns: 92px repeat(5, minmax(0, 1fr)); }
   .calendar-grid.calendar-grid-day { min-width: 0; }
-  .calendar-time { padding: 8px 10px; white-space: normal; }
+  .calendar-time { padding: 8px 6px; font-size: 10px; text-align: center; }
   .calendar-view-control { justify-self: start; }
   .calendar-day-filter { width: 100%; }
   .field-inline { min-width: 0; }
@@ -2705,10 +2752,16 @@ body.modal-open { overflow: hidden; }
   .home-about { grid-template-columns: minmax(0, 1fr); }
   .home-dashboard-preview { width: 100%; max-width: 680px; margin: auto; }
   .home-footer { flex-wrap: wrap; }
+  .audit-summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
-  .home-header { position: relative; flex-wrap: wrap; justify-content: space-between; gap: 7px 12px; padding: 9px 18px; }
+  .home-header { position: relative; flex-wrap: wrap; justify-content: space-between; gap: 7px 12px; padding: 9px 18px;     .audit-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .audit-filters { align-items: stretch; }
+    .audit-filters .field-inline, .audit-filters .field-inline:nth-child(3) { min-width: 100%; }
+    .audit-filters .button { flex: 1 1 auto; }
+    .audit-detail-dialog { padding: var(--s-4); }
+  }
   .home-brand { font-size: 16px; }
   .home-brand img { width: 34px; height: 34px; }
   .home-login { min-height: 42px; padding-inline: 13px; }

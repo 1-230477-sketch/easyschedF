@@ -3,7 +3,7 @@
 
   const NAV = {
     admin: [
-      ['dashboard', 'Overview'], ['schedules', 'Schedule'], ['data', 'Academic setup'], ['room-requests', 'Room requests'], ['reports', 'Reports'], ['profile', 'Profile'], ['settings', 'Settings'], ['help', 'Help']
+      ['dashboard', 'Overview'], ['schedules', 'Schedule'], ['data', 'Academic setup'], ['room-requests', 'Room requests'], ['reports', 'Reports'], ['audit-logs', 'Security & Audit Logs'], ['profile', 'Profile'], ['settings', 'Settings'], ['help', 'Help']
     ],
     scheduler: [
       ['dashboard', 'Overview'], ['schedules', 'Schedule'], ['data', 'Academic setup'], ['reports', 'Reports'], ['profile', 'Profile'], ['settings', 'Settings'], ['help', 'Help']
@@ -23,7 +23,8 @@
     reports: ['Evidence and review', 'Validation reports'],
     profile: ['Account', 'Profile'],
     settings: ['System controls', 'Account controls'],
-    help: ['Quick orientation', 'Getting started']
+    help: ['Quick orientation', 'Getting started'],
+    'audit-logs': ['Security monitoring', 'Audit logs']
   };
   const BASE_PATH = document.querySelector('meta[name="app-base-path"]')?.content || '';
   const ROUTES = {
@@ -39,6 +40,7 @@
     profile: 'profile',
     settings: 'settings',
     help: 'help'
+    , 'audit-logs': 'audit-logs'
   };
   // Inline SVG only: the content security policy forbids external assets, and
   // font glyphs render inconsistently across the machines used for review.
@@ -56,6 +58,7 @@
     success: '<circle cx="12" cy="12" r="8.6"/><path d="M8.4 12.4l2.4 2.4 4.8-5.2"/>',
     error: '<circle cx="12" cy="12" r="8.6"/><path d="M9.2 9.2l5.6 5.6M14.8 9.2l-5.6 5.6"/>',
     warn: '<path d="M12 4.4l8.4 14.6H3.6z"/><path d="M12 9.9v4M12 16.5h.01"/>',
+    shield: '<path d="M12 3l7.5 3v5.6c0 4.4-3 8-7.5 9.4-4.5-1.4-7.5-5-7.5-9.4V6z"/><path d="M9 12.2l2.1 2.1L15.2 10"/>',
     close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
     empty: '<path d="M3.5 13.6h4.2l1.6 2.6h5.4l1.6-2.6h4.2"/><path d="M3.5 13.6L6.1 5.4h11.8l2.6 8.2v4.3a1.8 1.8 0 01-1.8 1.8H5.3a1.8 1.8 0 01-1.8-1.8z"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7"/>',
@@ -69,7 +72,8 @@
     reports: svgIcon(PATH.chart),
     profile: svgIcon(PATH.users),
     settings: svgIcon(PATH.sliders),
-    help: svgIcon(PATH.book)
+    help: svgIcon(PATH.book),
+    'audit-logs': svgIcon(PATH.shield)
   };
   const METRIC_ICONS = {
     'Active class assignments': PATH.book,
@@ -81,18 +85,20 @@
     'Sections covered': PATH.dashboard
   };
   const emptyState = (title, detail) => `<div class="empty-state">${svgIcon(PATH.empty, 26)}<strong>${esc(title)}</strong>${esc(detail)}</div>`;
-  const state = { snapshot: null, page: 'dashboard', dataTab: 'subjects', scheduleView: 'all', scheduleFilter: 'all', calendarView: 'week', calendarDay: '', query: '', subjectQuery: '' };
-  const CALENDAR_LAYOUT_KEY = 'easysched-calendar-layout-v2';
+  const state = { snapshot: null, page: 'dashboard', dataTab: 'subjects', scheduleView: 'all', scheduleFilter: 'all', calendarView: 'week', calendarDay: '', query: '', subjectQuery: '', audit: { rows: [], page: 1, pages: 1, total: 0, filters: {} } };
+  const CALENDAR_LAYOUT_KEY = 'easysched-calendar-layout-v6';
   const LEGACY_CALENDAR_LAYOUT_KEY = 'easysched-calendar-layout';
   const calendarLayout = { timeWidth: null, dayWidths: [], rowHeights: [], columnsAdjusted: false };
   const calendarDetailGroups = new Map();
   let activeCalendarDetailGroup = null;
   let calendarResize = null;
+  let calendarResizeFrame = 0;
   let roomAvailabilityCheckId = 0;
   let roomAvailabilityTimer = 0;
   let availableRoomsReady = false;
   let roomRequestAllowed = false;
   let brandPopupReturnFocus = null;
+  const CALENDAR_RESIZE_SENSITIVITY = 0.2;
   const HELP_SLIDES = {
     admin: [
       ['Administrator orientation', 'You manage the complete EasySched workspace: users, academic data, schedule generation, reports, and security settings.', ['Start with Academic setup and review the active term before making changes.']],
@@ -163,6 +169,7 @@
       const payload = { ...(options.body || {}), csrf: state.snapshot?.csrf || '' };
       init.body = JSON.stringify(payload);
     }
+
     const response = await fetch(url, init);
     const contentType = response.headers.get('content-type') || '';
     if (action === 'export' && !contentType.includes('application/json')) return response;
@@ -179,6 +186,76 @@
       throw error;
     }
     return payload.data;
+  }
+
+  function auditFilterValues() {
+    return {
+      from: $('#auditFrom').value, to: $('#auditTo').value, q: $('#auditQuery').value.trim(),
+      severity: $('#auditSeverity').value, outcome: $('#auditOutcome').value, target_type: $('#auditTarget').value,
+      page: state.audit.page, limit: 25
+    };
+  }
+
+  async function auditRequest(action, params = {}) {
+    const query = new URLSearchParams({ action, ...params });
+    const response = await fetch(`api.php?${query.toString()}`, { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+    const payload = await response.json();
+    if (!response.ok || payload.ok === false) {
+      const error = new Error(payload.error || 'The audit request could not be completed.');
+      error.status = response.status;
+      throw error;
+    }
+    return payload.data;
+  }
+
+  function renderAuditRows(rows) {
+    const body = $('#auditBody');
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="8" class="empty-state">No audit events match the selected filters.</td></tr>';
+      return;
+    }
+    body.innerHTML = rows.map((row) => `<tr>
+      <td>${esc(row.occurred_at_utc)}</td>
+      <td>${esc(row.username || 'System')}</td>
+      <td><strong>${esc(row.action)}</strong></td>
+      <td>${esc(row.entity_type || '—')}${row.entity_id ? ` #${esc(row.entity_id)}` : ''}</td>
+      <td><span class="audit-badge audit-${esc(String(row.severity).toLowerCase())}">${esc(row.severity)}</span></td>
+      <td>${esc(row.outcome)}</td><td>${esc(row.source_ip || 'Unavailable')}</td>
+      <td><button class="button button-ghost button-small" type="button" data-audit-detail="${esc(row.id)}">Details</button></td>
+    </tr>`).join('');
+  }
+
+  async function loadAuditLogs() {
+    if (!canAdmin()) return;
+    const filters = auditFilterValues();
+    $('#auditStatus').textContent = 'Loading audit events…';
+    try {
+      const [summary, result] = await Promise.all([auditRequest('audit_summary', filters), auditRequest('audit_logs', filters)]);
+      state.audit = { ...result, filters };
+      $('#auditTotal').textContent = summary.total ?? 0; $('#auditFailedLogins').textContent = summary.failed_logins ?? 0;
+      $('#auditDenied').textContent = summary.denied ?? 0; $('#auditWarnings').textContent = summary.warnings ?? 0; $('#auditCritical').textContent = summary.critical ?? 0;
+      renderAuditRows(result.rows || []);
+      $('#auditPageLabel').textContent = `Page ${result.page} of ${result.pages}`;
+      $('#auditPreviousButton').disabled = result.page <= 1; $('#auditNextButton').disabled = result.page >= result.pages;
+      $('#auditStatus').textContent = `${result.total} event${result.total === 1 ? '' : 's'} found.`;
+    } catch (error) {
+      $('#auditStatus').textContent = error.message;
+      $('#auditBody').innerHTML = '<tr><td colspan="8" class="empty-state">Audit events could not be loaded.</td></tr>';
+    }
+  }
+
+  async function showAuditDetail(id) {
+    try {
+      const row = await auditRequest('audit_detail', { id });
+      const details = Object.entries(row.details || {}).map(([key, value]) => `<dt>${esc(key)}</dt><dd>${esc(typeof value === 'object' ? JSON.stringify(value) : value)}</dd>`).join('');
+      $('#auditDetailTitle').textContent = row.action;
+      $('#auditDetailContent').innerHTML = `<dl class="audit-detail-list">
+        <dt>Timestamp (PHT)</dt><dd>${esc(row.occurred_at_utc)}</dd><dt>Actor</dt><dd>${esc(row.username || 'System')} (${esc(row.role || 'Unavailable')})</dd>
+        <dt>Target</dt><dd>${esc(row.entity_type || 'Unavailable')}${row.entity_id ? ` #${esc(row.entity_id)}` : ''}</dd>
+        <dt>Severity</dt><dd>${esc(row.severity)}</dd><dt>Outcome</dt><dd>${esc(row.outcome)}</dd><dt>Source IP</dt><dd>${esc(row.source_ip || 'Unavailable')}</dd>
+        <dt>Request</dt><dd>${esc(row.http_method || '')} ${esc(row.request_path || 'Unavailable')}</dd><dt>Correlation ID</dt><dd>${esc(row.correlation_id || 'Unavailable')}</dd>${details}</dl>`;
+      $('#auditDetailDialog').showModal();
+    } catch (error) { showToast('Cannot load audit event', error.message, 'error'); }
   }
 
   function showToast(title, message, type = 'success') {
@@ -454,6 +531,7 @@
     if (page === 'profile') renderProfile();
     if (page === 'settings') renderSettings();
     if (page === 'help') renderHelp();
+    if (page === 'audit-logs') loadAuditLogs();
   }
 
   function renderHelp() {
@@ -590,6 +668,15 @@
     const startPeriod = start.slice(-2);
     const endPeriod = end.slice(-2);
     return `${startPeriod === endPeriod ? start.slice(0, -3) : start}–${end}`;
+  }
+
+  function scheduleTimeRangeLabel(row) {
+    if (row.time_label) return row.time_label;
+    const start = scheduleClockMinutes(row.start_time);
+    const end = scheduleClockMinutes(row.end_time);
+    return start === null || end === null
+      ? row.time_label || row.slot_label || 'Time unavailable'
+      : `${scheduleClockLabel(start)} – ${scheduleClockLabel(end)}`;
   }
 
   function visibleScheduleRows() {
@@ -737,6 +824,16 @@
       if (dayRows) dayRows.push({ row, startRow, rowSpan });
     });
 
+    const renderCalendarEvent = ({ row, rowSpan }) => {
+      const subject = subjectById(row.subject_id);
+      const roomType = row.room_type || subject?.room_type || 'LECTURE';
+      const eventClass = scheduleTypeClass(roomType);
+      const timeLabel = scheduleTimeRangeLabel(row);
+      const duration = scheduleDurationLabel(row);
+      const title = `${row.subject_code} | ${row.section_code} | ${row.room_code} | ${row.instructor_name} | ${timeLabel} | ${duration}`;
+      return `<article class="calendar-event ${eventClass}${rowSpan > 1 ? ' calendar-event-long' : ''}" aria-label="${esc(title)}" title="${esc(title)}"><span class="calendar-event-time">${esc(timeLabel)}</span><strong>${esc(row.subject_code)}</strong><span>${esc(row.section_code)} · ${esc(row.room_code)}</span><span class="calendar-event-instructor">${esc(row.instructor_name)}</span></article>`;
+    };
+
     let html = '<div class="calendar-cell calendar-head calendar-row-1 calendar-column-1">Time</div>';
     columns.forEach(([day, name], index) => {
       const originalDayIndex = allColumns.findIndex(([allDay]) => String(allDay) === String(day));
@@ -744,7 +841,12 @@
     });
     timeSlots.forEach((slot, index) => {
       const gridRow = index + 2;
-      html += `<div class="calendar-cell calendar-time calendar-row-${gridRow} calendar-column-1">${esc(slot.label)}<span class="calendar-resize calendar-resize-row" role="separator" tabindex="0" aria-orientation="horizontal" aria-valuemin="56" aria-valuemax="240" aria-label="Resize row after ${esc(slot.label)}" title="Drag to resize this time slot" data-resize-axis="row" data-resize-index="${index}"></span></div>`;
+      const slotStart = scheduleClockMinutes(slot.start_time);
+      const slotEnd = scheduleClockMinutes(slot.end_time);
+      const slotLabel = slotStart !== null && slotEnd !== null
+        ? `<span class="calendar-time-start">${esc(scheduleClockLabel(slotStart))}</span><span class="calendar-time-divider">–</span><span class="calendar-time-end">${esc(scheduleClockLabel(slotEnd))}</span>`
+        : esc(slot.label);
+      html += `<div class="calendar-cell calendar-time calendar-row-${gridRow} calendar-column-1">${slotLabel}<span class="calendar-resize calendar-resize-row" role="separator" tabindex="0" aria-orientation="horizontal" aria-valuemin="56" aria-valuemax="240" aria-label="Resize row after ${esc(slot.label)}" title="Drag to resize this time slot" data-resize-axis="row" data-resize-index="${index}"></span></div>`;
       columns.forEach((_, dayIndex) => {
         html += `<div class="calendar-cell calendar-row-${gridRow} calendar-column-${dayIndex + 2}"></div>`;
       });
@@ -758,10 +860,14 @@
       const gridColumn = dayColumns.get(day);
       if (!gridColumn) return;
       const groups = state.calendarView === 'day'
-        ? dayRows.map((entry) => ({ startRow: entry.startRow, entries: [entry], rowSpan: entry.rowSpan }))
+        ? dayRows.map((entry) => ({
+          startRow: entry.startRow,
+          entries: [entry],
+          rowSpan: entry.rowSpan
+        }))
         : (() => {
         const overlapGroups = [];
-          dayRows.forEach((entry) => {
+        dayRows.forEach((entry) => {
           const previous = overlapGroups[overlapGroups.length - 1];
           const entryEnd = entry.startRow + entry.rowSpan;
           if (!previous || entry.startRow >= previous.endRow) {
@@ -787,14 +893,8 @@
           laneEnds[lane] = startRow + rowSpan;
         }
         if (entries.length === 1) {
-          const row = entries[0].row;
-          const subject = subjectById(row.subject_id);
-          const roomType = row.room_type || subject?.room_type || 'LECTURE';
-          const eventClass = scheduleTypeClass(roomType);
-          const timeLabel = row.time_label || row.slot_label;
-          const duration = scheduleDurationLabel(row);
-          const title = `${row.subject_code} | ${row.section_code} | ${row.room_code} | ${row.instructor_name} | ${timeLabel} | ${duration}`;
-          return `<article class="calendar-event ${eventClass} calendar-event-start-${startRow + 1} calendar-event-span-${rowSpan} calendar-event-lane-${lane + 1}${rowSpan > 1 ? ' calendar-event-long' : ''}" aria-label="${esc(title)}" title="${esc(title)}"><span class="calendar-event-time">${esc(timeLabel)}</span><strong>${esc(row.subject_code)}</strong><span>${esc(row.section_code)} · ${esc(row.room_code)}</span><span class="calendar-event-instructor">${esc(row.instructor_name)}</span></article>`;
+          const event = renderCalendarEvent(entries[0]);
+          return event.replace('class="calendar-event ', `class="calendar-event calendar-event-start-${startRow + 1} calendar-event-span-${rowSpan} calendar-event-lane-${lane + 1} `);
         }
         const startLabel = timeSlots[startRow]?.label || entries[0].row.time_label || entries[0].row.slot_label;
         const startMinutes = entries.map(({ row }) => scheduleClockMinutes(row.start_time)).filter((value) => value !== null);
@@ -805,22 +905,17 @@
         const label = `${entries.length} classes scheduled ${timeRange}`;
         const detailId = String(calendarDetailGroups.size);
         calendarDetailGroups.set(detailId, { entries, day: allColumns.find(([dayId]) => String(dayId) === String(day))?.[1] || '', timeRange });
-        const groupsByDuration = new Map();
+        const groupsByTime = new Map();
         entries.forEach((entry) => {
-          const durationGroup = groupsByDuration.get(entry.rowSpan) || [];
-          durationGroup.push(entry.row);
-          groupsByDuration.set(entry.rowSpan, durationGroup);
+          const range = scheduleTimeRangeLabel(entry.row);
+          const timeGroup = groupsByTime.get(range) || [];
+          timeGroup.push(entry.row);
+          groupsByTime.set(range, timeGroup);
         });
-        const durationSummary = [...groupsByDuration.entries()]
-          .sort(([left], [right]) => left - right)
-          .map(([span, durationRows]) => {
-            const durationStarts = durationRows.map((row) => scheduleClockMinutes(row.start_time)).filter((value) => value !== null);
-            const durationEnds = durationRows.map((row) => scheduleClockMinutes(row.end_time)).filter((value) => value !== null);
-            const start = durationStarts.length ? Math.min(...durationStarts) : scheduleClockMinutes(timeSlots[startRow]?.start_time) || 0;
-            const end = durationEnds.length ? Math.max(...durationEnds) : start;
-            const range = scheduleCompactTimeRange(start, end);
-            const noun = durationRows.length === 1 ? 'class' : 'classes';
-            return `<span class="calendar-overlap-duration"><strong>${durationRows.length}</strong> ${noun} · ${esc(range)}</span>`;
+        const durationSummary = [...groupsByTime.entries()]
+          .map(([range, timeRows]) => {
+            const noun = timeRows.length === 1 ? 'class' : 'classes';
+            return `<span class="calendar-overlap-duration"><strong>${timeRows.length}</strong> ${noun} · ${esc(range)}</span>`;
           }).join('');
         return `<button class="calendar-event calendar-overlap calendar-event-start-${startRow + 1} calendar-event-span-${rowSpan} calendar-event-lane-${lane + 1}" type="button" data-calendar-detail-id="${detailId}" aria-label="${esc(label)}" title="Show all ${entries.length} classes scheduled ${esc(timeRange)}"><strong>${entries.length} ${entries.length === 1 ? 'class' : 'classes'}</strong><span class="calendar-overlap-breakdown">${durationSummary}</span><span class="calendar-overlap-action">Select to view all details</span></button>`;
       }).join('');
@@ -867,10 +962,19 @@
     const visibleIndexes = state.calendarView === 'day'
       ? [allColumns.findIndex(([day]) => String(day) === state.calendarDay)].filter((index) => index >= 0)
       : allColumns.map((_, index) => index);
+    const timeWidth = window.matchMedia('(max-width: 620px)').matches ? 92 : calendarLayout.timeWidth;
+    const availableDayWidth = Math.max(0, calendar.parentElement.clientWidth - timeWidth);
+    const savedDayWidth = visibleIndexes.reduce((sum, index) => sum + calendarLayout.dayWidths[index], 0);
+    const scale = savedDayWidth > availableDayWidth && availableDayWidth > 0
+      ? availableDayWidth / savedDayWidth
+      : 1;
+    const fittedWidths = visibleIndexes.map((index) => Math.max(0, calendarLayout.dayWidths[index] * scale));
     calendar.style.width = '100%';
     calendar.style.gridTemplateColumns = state.calendarView === 'day'
-      ? `${calendarLayout.timeWidth}px minmax(0, 1fr)`
-      : `${calendarLayout.timeWidth}px ${visibleIndexes.map((index) => `${calendarLayout.dayWidths[index]}px`).join(' ')}`;
+      ? `${timeWidth}px minmax(0, 1fr)`
+      : calendarLayout.columnsAdjusted
+      ? `${timeWidth}px ${fittedWidths.map((width) => `${width}px`).join(' ')}`
+      : `${timeWidth}px repeat(${visibleIndexes.length}, minmax(0, 1fr))`;
     calendar.style.gridTemplateRows = `40px ${calendarLayout.rowHeights.map((height) => `minmax(${height}px, auto)`).join(' ')}`;
     $$('.calendar-resize-column', calendar).forEach((handle) => {
       const width = calendarLayout.dayWidths[Number(handle.dataset.resizeIndex) - 1];
@@ -907,14 +1011,26 @@
   function resizeCalendarHandle(handle, delta) {
     const index = Number(handle.dataset.resizeIndex);
     if (handle.dataset.resizeAxis === 'column') {
-      const width = calendarLayout.dayWidths[index - 1];
-      calendarLayout.dayWidths[index - 1] = Math.max(100, Math.min(720, width + delta));
+      resizeCalendarColumns(index - 1, delta);
       calendarLayout.columnsAdjusted = true;
     } else {
       const height = calendarLayout.rowHeights[index];
       calendarLayout.rowHeights[index] = Math.max(56, Math.min(240, height + delta));
     }
+
     applyCalendarLayout();
+  }
+
+  function resizeCalendarColumns(index, delta) {
+    const neighbor = index + 1 < calendarLayout.dayWidths.length ? index + 1 : index - 1;
+    if (index < 0 || neighbor < 0 || neighbor >= calendarLayout.dayWidths.length) return;
+    const direction = neighbor > index ? 1 : -1;
+    const current = calendarLayout.dayWidths[index];
+    const adjacent = calendarLayout.dayWidths[neighbor];
+    const nextCurrent = Math.max(100, Math.min(720, current + delta * direction));
+    const applied = nextCurrent - current;
+    calendarLayout.dayWidths[index] = nextCurrent;
+    calendarLayout.dayWidths[neighbor] = Math.max(100, Math.min(720, adjacent - applied));
   }
 
   function beginCalendarResize(event) {
@@ -927,6 +1043,10 @@
       pointerId: event.pointerId,
       axis: handle.dataset.resizeAxis,
       start: handle.dataset.resizeAxis === 'column' ? event.clientX : event.clientY,
+      latestCoordinate: handle.dataset.resizeAxis === 'column' ? event.clientX : event.clientY,
+      appliedCoordinate: handle.dataset.resizeAxis === 'column' ? event.clientX : event.clientY,
+      initialDayWidths: calendarLayout.dayWidths.slice(),
+      initialRowHeights: calendarLayout.rowHeights.slice(),
       initial: handle.dataset.resizeAxis === 'column'
         ? calendarLayout.dayWidths[Number(handle.dataset.resizeIndex) - 1]
         : calendarLayout.rowHeights[Number(handle.dataset.resizeIndex)]
@@ -936,19 +1056,45 @@
   function moveCalendarResize(event) {
     if (!calendarResize || event.pointerId !== calendarResize.pointerId) return;
     const coordinate = calendarResize.axis === 'column' ? event.clientX : event.clientY;
-    const delta = coordinate - calendarResize.start;
-    const index = Number(calendarResize.handle.dataset.resizeIndex);
-    if (calendarResize.axis === 'column') {
-      calendarLayout.dayWidths[index - 1] = Math.max(100, Math.min(720, calendarResize.initial + delta));
-      calendarLayout.columnsAdjusted = true;
-    } else {
-      calendarLayout.rowHeights[index] = Math.max(56, Math.min(240, calendarResize.initial + delta));
-    }
-    applyCalendarLayout();
+    calendarResize.latestCoordinate = coordinate;
+    if (calendarResizeFrame) return;
+    calendarResizeFrame = requestAnimationFrame(() => {
+      calendarResizeFrame = 0;
+      if (!calendarResize) return;
+      const delta = calendarResize.latestCoordinate - calendarResize.start;
+      const index = Number(calendarResize.handle.dataset.resizeIndex);
+      if (calendarResize.axis === 'column') {
+        calendarLayout.dayWidths = calendarResize.initialDayWidths.slice();
+        resizeCalendarColumns(index - 1, delta * CALENDAR_RESIZE_SENSITIVITY);
+        calendarLayout.columnsAdjusted = true;
+      } else {
+        calendarLayout.rowHeights = calendarResize.initialRowHeights.slice();
+        calendarLayout.rowHeights[index] = Math.max(56, Math.min(240, calendarResize.initial + (delta * CALENDAR_RESIZE_SENSITIVITY)));
+      }
+      applyCalendarLayout();
+      calendarResize.appliedCoordinate = calendarResize.latestCoordinate;
+    });
   }
 
   function endCalendarResize(event) {
     if (!calendarResize || event.pointerId !== calendarResize.pointerId) return;
+    if (calendarResizeFrame) {
+      cancelAnimationFrame(calendarResizeFrame);
+      calendarResizeFrame = 0;
+    }
+    if (calendarResize.latestCoordinate !== calendarResize.appliedCoordinate) {
+      const delta = calendarResize.latestCoordinate - calendarResize.start;
+      const index = Number(calendarResize.handle.dataset.resizeIndex);
+      if (calendarResize.axis === 'column') {
+        calendarLayout.dayWidths = calendarResize.initialDayWidths.slice();
+        resizeCalendarColumns(index - 1, delta * CALENDAR_RESIZE_SENSITIVITY);
+        calendarLayout.columnsAdjusted = true;
+      } else {
+        calendarLayout.rowHeights = calendarResize.initialRowHeights.slice();
+        calendarLayout.rowHeights[index] = Math.max(56, Math.min(240, calendarResize.initial + (delta * CALENDAR_RESIZE_SENSITIVITY)));
+      }
+      applyCalendarLayout();
+    }
     calendarResize = null;
     saveCalendarLayout();
   }
@@ -1680,6 +1826,13 @@
       }
     });
     $('#brandPopupTrigger').addEventListener('click', openBrandPopup);
+    $('#auditFilters').addEventListener('submit', (event) => { event.preventDefault(); state.audit.page = 1; loadAuditLogs(); });
+    $('#auditClearButton').addEventListener('click', () => { $('#auditFilters').reset(); state.audit.page = 1; loadAuditLogs(); });
+    $('#auditPreviousButton').addEventListener('click', () => { if (state.audit.page > 1) { state.audit.page -= 1; loadAuditLogs(); } });
+    $('#auditNextButton').addEventListener('click', () => { if (state.audit.page < state.audit.pages) { state.audit.page += 1; loadAuditLogs(); } });
+    $('#auditExportButton').addEventListener('click', () => { const query = new URLSearchParams({ action: 'audit_export', ...auditFilterValues() }); window.location.href = `api.php?${query.toString()}`; });
+    $('#auditBody').addEventListener('click', (event) => { const button = event.target.closest('[data-audit-detail]'); if (button) showAuditDetail(button.dataset.auditDetail); });
+    $('#auditDetailClose').addEventListener('click', () => $('#auditDetailDialog').close());
     $('#brandPopupClose').addEventListener('click', closeBrandPopup);
     $('#brandPopup').addEventListener('mousedown', (event) => { if (event.target === $('#brandPopup')) closeBrandPopup(); });
     document.addEventListener('submit', (event) => { if (event.target.matches('[data-profile-form]')) saveStudentProfile(event); });

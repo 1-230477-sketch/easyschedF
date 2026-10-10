@@ -40,6 +40,7 @@ Never import old plaintext passwords. Provision new accounts and set password ha
 5. Attempt a conflicting manual edit. The server rejects it and leaves the published entry unchanged.
 6. Sign in as `instructor` and `student` to demonstrate server-side scope restrictions. Changing an identifier in a request does not broaden either role's schedule view.
 7. Open **Reports** to show room utilization and constraint evidence.
+8. As an administrator, open **Security & Audit Logs** to review authenticated actions, failed logins, denied access, scheduling activity, and other recorded events. Use the bounded filters, detail view, or CSV export for investigation.
 
 ## Architecture
 
@@ -73,6 +74,7 @@ Instructor, room, and section availability can be stored in `instructor_availabi
 - Every protected action checks the session role on the server. UI hiding is not the authorization boundary.
 - CSP, frame, MIME-sniffing, referrer, permissions, and no-cache headers are sent by the application.
 - CSV export prefixes formula-like values to reduce spreadsheet injection risk.
+- Security and audit logs are available only to the `admin` role. Dashboard and CSV timestamps use Philippine Time (`Asia/Manila`, PHT). The application records safe, structured metadata without passwords, tokens, session identifiers, or raw request bodies; application append-only behavior is not database-level tamper protection.
 - Under Apache, deny the `data` directory at the reverse proxy/web-server layer in production.
 
 Session protection and security headers remain enabled on localhost. Keep `.env` out of source control.

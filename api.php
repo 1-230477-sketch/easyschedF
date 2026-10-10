@@ -46,6 +46,7 @@ if (!defined('EASYSCHED_LIBRARY_MODE')) {
     try {
         easysched_start_session();
         easysched_send_security_headers();
+        $_SERVER['EASYSCHED_REQUEST_ID'] ??= bin2hex(random_bytes(12));
     } catch (Throwable $e) {
         error_log('Session initialization error: ' . $e->getMessage());
         ob_clean();
@@ -179,11 +180,145 @@ function require_auth(PDO $pdo, array $roles = []): array
     return $user;
 }
 
+function audit_safe_details(array $details): array
+{
+    $blocked = ['password', 'password_hash', 'token', 'csrf', 'session', 'cookie', 'secret', 'api_key', 'code_hash'];
+    $clean = [];
+    foreach ($details as $key => $value) {
+        $name = strtolower((string) $key);
+        $isBlocked = false;
+        foreach ($blocked as $needle) {
+            if (str_contains($name, $needle)) {
+                $isBlocked = true;
+                break;
+            }
+        }
+        if ($isBlocked) {
+            continue;
+        }
+        if (is_array($value)) {
+            $clean[(string) $key] = audit_safe_details($value);
+        } elseif (is_scalar($value) || $value === null) {
+            $clean[(string) $key] = is_string($value) ? substr($value, 0, 500) : $value;
+        }
+    }
+    return $clean;
+}
+
 function audit(PDO $pdo, ?array $user, string $action, ?string $entity = null, ?int $entityId = null, array $details = []): void
 {
-    $philippineNow = (new DateTimeImmutable('now', new DateTimeZone('Asia/Manila')))->format('Y-m-d H:i:s');
-    $stmt = $pdo->prepare('INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?)');
-    $stmt->execute([$user['id'] ?? null, $action, $entity, $entityId, encode_json($details), $philippineNow]);
+    $severity = str_contains($action, 'FAILURE') || str_contains($action, 'DENIED') || str_contains($action, 'CONFLICT') ? 'WARNING' : 'INFO';
+    if (str_contains($action, 'UNAUTHORIZED') || str_contains($action, 'SECURITY_ALERT')) {
+        $severity = 'CRITICAL';
+    }
+    $outcome = str_contains($action, 'FAILURE') ? 'FAILURE' : (str_contains($action, 'DENIED') ? 'DENIED' : 'SUCCESS');
+    $details = audit_safe_details($details);
+    $requestPath = substr((string) ($_SERVER['REQUEST_URI'] ?? ''), 0, 500);
+    $method = substr((string) ($_SERVER['REQUEST_METHOD'] ?? ''), 0, 16);
+    $ip = filter_var($_SERVER['REMOTE_ADDR'] ?? null, FILTER_VALIDATE_IP) ?: null;
+    $agent = substr((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 500);
+    $correlation = (string) ($_SERVER['EASYSCHED_REQUEST_ID'] ?? '');
+    $stmt = $pdo->prepare('INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details_json, severity, outcome, request_path, http_method, source_ip, user_agent, correlation_id, occurred_at_utc, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)');
+    $stmt->execute([$user['id'] ?? null, $action, $entity, $entityId, encode_json($details), $severity, $outcome, $requestPath, $method, $ip, $agent, $correlation]);
+}
+
+function respond_csv(string $content, string $filename): never
+{
+    while (ob_get_level()) ob_end_clean();
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . preg_replace('/[^A-Za-z0-9_.-]/', '_', $filename) . '"');
+    echo $content;
+    exit(0);
+}
+
+function audit_csv_cell(mixed $value): string
+{
+    $text = (string) ($value ?? '');
+    if (preg_match('/^[=+\-@]/', $text)) $text = "'" . $text;
+    return '"' . str_replace('"', '""', $text) . '"';
+}
+
+function audit_admin_user(PDO $pdo): array
+{
+    $user = current_user($pdo);
+    if (!$user) {
+        audit($pdo, null, 'UNAUTHORIZED_AUDIT_ACCESS', 'audit_logs', null, ['reason' => 'authentication_required']);
+        throw new ApiError(401, 'Authentication is required.');
+    }
+    if ($user['role'] !== 'admin') {
+        audit($pdo, $user, 'UNAUTHORIZED_AUDIT_ACCESS', 'audit_logs', null, ['reason' => 'admin_required']);
+        throw new ApiError(403, 'Only administrators can access security logs.');
+    }
+    return $user;
+}
+
+function audit_query_filters(array $input): array
+{
+    $allowedSeverities = ['INFO', 'WARNING', 'CRITICAL'];
+    $allowedOutcomes = ['SUCCESS', 'FAILURE', 'DENIED'];
+    $allowedTargets = ['user', 'schedule_run', 'schedule_request', 'rooms', 'instructors', 'subjects', 'programs', 'sections', 'offerings', 'authentication', 'settings', 'audit_logs'];
+    $severity = strtoupper(trim((string) ($input['severity'] ?? '')));
+    $outcome = strtoupper(trim((string) ($input['outcome'] ?? '')));
+    $target = trim((string) ($input['target_type'] ?? ''));
+    if ($severity !== '' && !in_array($severity, $allowedSeverities, true)) throw new ApiError(422, 'Invalid severity filter.');
+    if ($outcome !== '' && !in_array($outcome, $allowedOutcomes, true)) throw new ApiError(422, 'Invalid outcome filter.');
+    if ($target !== '' && !in_array($target, $allowedTargets, true)) throw new ApiError(422, 'Invalid target filter.');
+    $userId = trim((string) ($input['user_id'] ?? ''));
+    if ($userId !== '' && (!ctype_digit($userId) || (int) $userId < 1)) throw new ApiError(422, 'Invalid user filter.');
+    $from = trim((string) ($input['from'] ?? ''));
+    $to = trim((string) ($input['to'] ?? ''));
+    foreach ([$from, $to] as $date) {
+        if ($date !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) throw new ApiError(422, 'Dates must use YYYY-MM-DD format.');
+    }
+    $conditions = [];
+    $params = [];
+    if ($from !== '') { $conditions[] = "(al.occurred_at_utc AT TIME ZONE 'Asia/Manila') >= ?::date"; $params[] = $from; }
+    if ($to !== '') { $conditions[] = "(al.occurred_at_utc AT TIME ZONE 'Asia/Manila') < (?::date + INTERVAL '1 day')"; $params[] = $to; }
+    if ($severity !== '') { $conditions[] = 'al.severity = ?'; $params[] = $severity; }
+    if ($outcome !== '') { $conditions[] = 'al.outcome = ?'; $params[] = $outcome; }
+    if ($target !== '') { $conditions[] = 'al.entity_type = ?'; $params[] = $target; }
+    if ($userId !== '') { $conditions[] = 'al.user_id = ?'; $params[] = (int) $userId; }
+    $keyword = trim((string) ($input['q'] ?? ''));
+    if ($keyword !== '') {
+        if (strlen($keyword) > 100) throw new ApiError(422, 'Search text is too long.');
+        $conditions[] = '(al.action ILIKE ? OR al.entity_type ILIKE ? OR al.details_json ILIKE ? OR u.username ILIKE ?)';
+        $like = '%' . $keyword . '%';
+        array_push($params, $like, $like, $like, $like);
+    }
+    return [$conditions ? ' WHERE ' . implode(' AND ', $conditions) : '', $params];
+}
+
+function audit_rows(PDO $pdo, array $input, bool $forExport = false): array
+{
+    [$where, $params] = audit_query_filters($input);
+    $sortMap = ['time' => 'al.occurred_at_utc', 'action' => 'al.action', 'severity' => 'al.severity', 'outcome' => 'al.outcome'];
+    $sort = $sortMap[(string) ($input['sort'] ?? 'time')] ?? $sortMap['time'];
+    $direction = strtoupper((string) ($input['direction'] ?? 'DESC')) === 'ASC' ? 'ASC' : 'DESC';
+    $limit = $forExport ? 5000 : min(100, max(1, (int) ($input['limit'] ?? 25)));
+    $page = $forExport ? 1 : min(10000, max(1, (int) ($input['page'] ?? 1)));
+    $offset = ($page - 1) * $limit;
+    $count = $pdo->prepare("SELECT COUNT(*) FROM audit_logs al LEFT JOIN users u ON u.id = al.user_id{$where}");
+    $count->execute($params);
+    $total = (int) $count->fetchColumn();
+    $sql = "SELECT al.id, to_char(al.occurred_at_utc AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD HH24:MI:SS') || ' PHT' AS occurred_at_utc, al.action, al.entity_type, al.entity_id, al.details_json, al.severity, al.outcome, al.request_path, al.http_method, host(al.source_ip) AS source_ip, al.user_agent, al.correlation_id, u.username, u.display_name, u.role FROM audit_logs al LEFT JOIN users u ON u.id = al.user_id{$where} ORDER BY {$sort} {$direction}, al.id DESC LIMIT {$limit} OFFSET {$offset}";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    $rows = $stmt->fetchAll();
+    foreach ($rows as &$row) {
+        $decoded = json_decode((string) $row['details_json'], true);
+        $row['details'] = is_array($decoded) ? $decoded : [];
+        unset($row['details_json']);
+    }
+    unset($row);
+    return ['rows' => $rows, 'total' => $total, 'page' => $page, 'limit' => $limit, 'pages' => max(1, (int) ceil($total / $limit))];
+}
+
+function audit_summary(PDO $pdo, array $input): array
+{
+    [$where, $params] = audit_query_filters($input);
+    $stmt = $pdo->prepare("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE action = 'LOGIN_FAILURE') AS failed_logins, COUNT(*) FILTER (WHERE outcome = 'DENIED') AS denied, COUNT(*) FILTER (WHERE severity = 'WARNING') AS warnings, COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS critical FROM audit_logs al LEFT JOIN users u ON u.id = al.user_id{$where}");
+    $stmt->execute($params);
+    return $stmt->fetch() ?: ['total' => 0, 'failed_logins' => 0, 'denied' => 0, 'warnings' => 0, 'critical' => 0];
 }
 
 function login_throttle_key(string $username): string
@@ -3079,6 +3214,39 @@ function handle(PDO $pdo): never
         send_email_message($recipient, 'New EasySched contact message', $html, $email);
         $_SESSION['contact_message_sent_at'] = time();
         respond(['ok' => true, 'data' => ['message' => 'Your message has been sent.']]);
+    }
+
+    if (in_array($action, ['audit_summary', 'audit_logs', 'audit_detail', 'audit_export'], true)) {
+        $admin = audit_admin_user($pdo);
+        $auditInput = $_GET;
+        if ($action === 'audit_detail') {
+            $auditInput = ['id' => $_GET['id'] ?? 0];
+        }
+        if ($action === 'audit_summary') {
+            respond(['ok' => true, 'data' => audit_summary($pdo, $auditInput)]);
+        }
+        if ($action === 'audit_detail') {
+            $id = (int) ($auditInput['id'] ?? 0);
+            if ($id < 1) throw new ApiError(422, 'A valid log id is required.');
+            $stmt = $pdo->prepare("SELECT al.id, to_char(al.occurred_at_utc AT TIME ZONE 'Asia/Manila', 'YYYY-MM-DD HH24:MI:SS') || ' PHT' AS occurred_at_utc, al.action, al.entity_type, al.entity_id, al.details_json, al.severity, al.outcome, al.request_path, al.http_method, host(al.source_ip) AS source_ip, al.user_agent, al.correlation_id, u.username, u.display_name, u.role FROM audit_logs al LEFT JOIN users u ON u.id = al.user_id WHERE al.id = ? LIMIT 1");
+            $stmt->execute([$id]);
+            $row = $stmt->fetch();
+            if (!$row) throw new ApiError(404, 'Audit event not found.');
+            $row['details'] = json_decode((string) $row['details_json'], true) ?: [];
+            unset($row['details_json']);
+            respond(['ok' => true, 'data' => $row]);
+        }
+        if ($action === 'audit_export') {
+            $result = audit_rows($pdo, $auditInput, true);
+            audit($pdo, $admin, 'EXPORT_AUDIT_LOGS', 'audit_logs', null, ['rows' => count($result['rows'])]);
+            $lines = [implode(',', array_map('audit_csv_cell', ['Timestamp PHT', 'Actor', 'Role', 'Action', 'Target', 'Severity', 'Outcome', 'Source IP', 'Request path', 'Method', 'Correlation ID', 'Summary']))];
+            foreach ($result['rows'] as $row) {
+                $summary = (string) (($row['details']['summary'] ?? '') ?: $row['action']);
+                $lines[] = implode(',', array_map('audit_csv_cell', [$row['occurred_at_utc'], $row['username'] ?: 'System', $row['role'] ?: '', $row['action'], ($row['entity_type'] ?: '') . ($row['entity_id'] ? ':' . $row['entity_id'] : ''), $row['severity'], $row['outcome'], $row['source_ip'], $row['request_path'], $row['http_method'], $row['correlation_id'], $summary]));
+            }
+            respond_csv(implode("\r\n", $lines) . "\r\n", 'easysched-audit-logs.csv');
+        }
+        respond(['ok' => true, 'data' => audit_rows($pdo, $auditInput)]);
     }
 
     $user = require_auth($pdo);

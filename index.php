@@ -404,6 +404,44 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                     </div>
                 </section>
 
+                <section class="page" id="page-audit-logs" data-page="audit-logs" aria-labelledby="auditLogsHeading" hidden>
+                    <div class="page-heading">
+                        <div><p class="eyebrow">Security monitoring</p><h2 id="auditLogsHeading">Security &amp; Audit Logs</h2><p class="muted">Append-only application events. Timestamps are shown in Philippine Time (PHT).</p></div>
+                        <button class="button button-secondary" id="auditExportButton" type="button">Export filtered CSV</button>
+                    </div>
+                    <div class="audit-summary-grid">
+                        <article class="audit-summary-card"><span>Total events</span><strong id="auditTotal">0</strong></article>
+                        <article class="audit-summary-card"><span>Failed logins</span><strong id="auditFailedLogins">0</strong></article>
+                        <article class="audit-summary-card"><span>Denied access</span><strong id="auditDenied">0</strong></article>
+                        <article class="audit-summary-card"><span>Warnings</span><strong id="auditWarnings">0</strong></article>
+                        <article class="audit-summary-card audit-critical"><span>Critical</span><strong id="auditCritical">0</strong></article>
+                    </div>
+                    <div class="panel audit-panel">
+                        <form id="auditFilters" class="audit-filters">
+                            <label class="field-inline">From<input id="auditFrom" type="date"></label>
+                            <label class="field-inline">To<input id="auditTo" type="date"></label>
+                            <label class="field-inline">Search<input id="auditQuery" type="search" maxlength="100" placeholder="Action, actor, details"></label>
+                            <label class="field-inline">Severity<select id="auditSeverity"><option value="">All</option><option>INFO</option><option>WARNING</option><option>CRITICAL</option></select></label>
+                            <label class="field-inline">Outcome<select id="auditOutcome"><option value="">All</option><option>SUCCESS</option><option>FAILURE</option><option>DENIED</option></select></label>
+                            <label class="field-inline">Target<select id="auditTarget"><option value="">All</option><option value="user">User</option><option value="schedule_run">Schedule run</option><option value="schedule_request">Schedule request</option><option value="authentication">Authentication</option><option value="settings">Settings</option><option value="audit_logs">Audit logs</option></select></label>
+                            <button class="button button-primary" type="submit">Apply filters</button>
+                            <button class="button button-ghost" id="auditClearButton" type="button">Clear</button>
+                        </form>
+                        <p class="audit-status" id="auditStatus" role="status" aria-live="polite"></p>
+                        <div class="table-wrap audit-table-wrap">
+                            <table class="data-table audit-table">
+                                <thead><tr><th>Timestamp (PHT)</th><th>Actor</th><th>Action</th><th>Target</th><th>Severity</th><th>Outcome</th><th>Source IP</th><th></th></tr></thead>
+                                <tbody id="auditBody"></tbody>
+                            </table>
+                        </div>
+                        <div class="audit-pagination"><button class="button button-ghost button-small" id="auditPreviousButton" type="button">Previous</button><span id="auditPageLabel">Page 1 of 1</span><button class="button button-ghost button-small" id="auditNextButton" type="button">Next</button></div>
+                    </div>
+                    <dialog class="audit-detail-dialog" id="auditDetailDialog">
+                        <div class="panel-heading"><div><p class="eyebrow">Event details</p><h3 id="auditDetailTitle">Audit event</h3></div><button class="icon-button" id="auditDetailClose" type="button" aria-label="Close details">&times;</button></div>
+                        <div id="auditDetailContent" class="audit-detail-content"></div>
+                    </dialog>
+                </section>
+
                 <section class="page" id="page-schedules" data-page="schedules" aria-labelledby="schedulesHeading" hidden>
                     <div class="print-header" aria-hidden="true">
                         <img src="assets/school-logo.png" alt="">

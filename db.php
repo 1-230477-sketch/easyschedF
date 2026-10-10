@@ -94,6 +94,20 @@ function ensure_schedule_request_date(PDO $pdo): void
     $pdo->exec('ALTER TABLE schedule_entries ADD COLUMN IF NOT EXISTS start_time_override TEXT');
     $pdo->exec('ALTER TABLE schedule_entries ADD COLUMN IF NOT EXISTS end_time_override TEXT');
     $pdo->exec('ALTER TABLE schedule_entries ADD COLUMN IF NOT EXISTS room_fit_override INTEGER NOT NULL DEFAULT 0');
+    $pdo->exec("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT 'INFO'");
+    $pdo->exec("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT 'SUCCESS'");
+    $pdo->exec('ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS request_path TEXT');
+    $pdo->exec('ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS http_method TEXT');
+    $pdo->exec('ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS source_ip INET');
+    $pdo->exec('ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS user_agent TEXT');
+    $pdo->exec('ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS correlation_id TEXT');
+    $pdo->exec('ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS occurred_at_utc TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_audit_logs_occurred_at ON audit_logs(occurred_at_utc DESC, id DESC)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id, occurred_at_utc DESC)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action, occurred_at_utc DESC)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_audit_logs_severity ON audit_logs(severity, occurred_at_utc DESC)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_audit_logs_outcome ON audit_logs(outcome, occurred_at_utc DESC)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id, occurred_at_utc DESC)');
 }
 
 function normalize_institution_branding(PDO $pdo): void
