@@ -192,9 +192,11 @@ CREATE TABLE IF NOT EXISTS schedule_occupancy (
 CREATE TABLE IF NOT EXISTS schedule_requests (
     id BIGSERIAL PRIMARY KEY,
     term_id BIGINT NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
-    offering_id BIGINT NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    offering_id BIGINT REFERENCES course_offerings(id) ON DELETE CASCADE,
     instructor_id BIGINT NOT NULL REFERENCES instructors(id) ON DELETE RESTRICT,
     room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+    request_type TEXT NOT NULL DEFAULT 'ROOM' CHECK (request_type IN ('ROOM', 'CHANGE', 'OTHER')),
+    target_entry_id BIGINT,
     request_date TEXT,
     day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
     slot_id BIGINT NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,

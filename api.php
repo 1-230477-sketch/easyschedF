@@ -1227,7 +1227,7 @@ function bootstrap(PDO $pdo, array $user): array
     }
     $scheduleRequests = [];
     if (in_array($user['role'], ['admin', 'instructor'], true)) {
-        $requestSql = "SELECT sr.*, s.code AS subject_code, s.name AS subject_name, sec.code AS section_code, i.name AS instructor_name, r.code AS room_code, ts.label AS slot_label, ts.start_time AS request_start_time, COALESCE(sr.requested_end_time, ts.end_time) AS requested_end_time FROM schedule_requests sr JOIN course_offerings co ON co.id=sr.offering_id JOIN subjects s ON s.id=co.subject_id JOIN sections sec ON sec.id=co.section_id JOIN instructors i ON i.id=sr.instructor_id JOIN rooms r ON r.id=sr.room_id JOIN time_slots ts ON ts.id=sr.slot_id WHERE 1=1";
+        $requestSql = "SELECT sr.*, s.code AS subject_code, CASE WHEN sr.request_type='OTHER' THEN 'Others' ELSE s.name END AS subject_name, sec.code AS section_code, i.name AS instructor_name, r.code AS room_code, ts.label AS slot_label, ts.start_time AS request_start_time, COALESCE(sr.requested_end_time, ts.end_time) AS requested_end_time, CASE WHEN target.id IS NULL THEN NULL ELSE target.day_of_week END AS previous_day_of_week, COALESCE(target.start_time_override, targetSlot.start_time) AS previous_start_time, COALESCE(target.end_time_override, (SELECT previousEnd.end_time FROM time_slots previousEnd WHERE previousEnd.slot_order = targetSlot.slot_order + s.duration_slots - 1), targetSlot.end_time) AS previous_end_time, targetRoom.code AS previous_room_code FROM schedule_requests sr LEFT JOIN course_offerings co ON co.id=sr.offering_id LEFT JOIN subjects s ON s.id=co.subject_id LEFT JOIN sections sec ON sec.id=co.section_id JOIN instructors i ON i.id=sr.instructor_id JOIN rooms r ON r.id=sr.room_id JOIN time_slots ts ON ts.id=sr.slot_id LEFT JOIN schedule_entries target ON target.id=sr.target_entry_id LEFT JOIN rooms targetRoom ON targetRoom.id=target.room_id LEFT JOIN time_slots targetSlot ON targetSlot.id=target.slot_id WHERE 1=1";
         $requestParams = [];
         if ($user['role'] === 'instructor') { $requestSql .= ' AND sr.instructor_id = ?'; $requestParams[] = (int) $user['instructor_id']; }
         if ($user['role'] === 'admin') $requestSql .= " AND sr.status='PENDING'";
@@ -2346,10 +2346,16 @@ function parse_room_request_times(array $input): array
     if ($date === '' && preg_match('/^\[REQUEST_DATE:(\d{4}-\d{2}-\d{2})\]/', (string) ($input['note'] ?? ''), $match)) {
         $date = $match[1];
     }
-    $dateValue = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+    $timezone = new DateTimeZone('Asia/Manila');
+    $dateValue = DateTimeImmutable::createFromFormat('!Y-m-d', $date, $timezone);
     $dateErrors = DateTimeImmutable::getLastErrors();
     if (!$dateValue || ($dateErrors !== false && ($dateErrors['warning_count'] > 0 || $dateErrors['error_count'] > 0)) || $dateValue->format('Y-m-d') !== $date) {
         throw new ApiError(422, 'Choose a valid exact date for the room request.');
+    }
+    $today = new DateTimeImmutable('today', $timezone);
+    $tomorrow = $today->modify('+1 day');
+    if ($dateValue < $tomorrow || $dateValue->format('Y') !== $today->format('Y')) {
+        throw new ApiError(422, 'Choose a date at least one day ahead within the current year.');
     }
     $day = (int) $dateValue->format('N');
     if ($day < 1 || $day > 5 || input_int($input, 'day_of_week', 1, 5) !== $day) {
@@ -2377,7 +2383,7 @@ function room_request_conflicts(PDO $pdo, int $roomId, int $instructorId, int $s
         }
     }
 
-    $requests = $pdo->prepare("SELECT sr.id, sr.room_id, sr.instructor_id, co.section_id, sr.status, s.name AS subject_name, ts.start_time, COALESCE(sr.requested_end_time, ts.end_time) AS end_time FROM schedule_requests sr JOIN course_offerings co ON co.id = sr.offering_id JOIN subjects s ON s.id = co.subject_id JOIN time_slots ts ON ts.id = sr.slot_id WHERE (sr.room_id = ? OR sr.instructor_id = ? OR co.section_id = ?) AND sr.term_id = ? AND sr.day_of_week = ? AND sr.status IN ('PENDING', 'APPROVED') AND (sr.request_date = ? OR (sr.request_date IS NULL AND sr.note LIKE ?)) AND (CAST(? AS INTEGER) IS NULL OR sr.id <> ?)");
+    $requests = $pdo->prepare("SELECT sr.id, sr.room_id, sr.instructor_id, co.section_id, sr.status, COALESCE(s.name, 'Other room request') AS subject_name, ts.start_time, COALESCE(sr.requested_end_time, ts.end_time) AS end_time FROM schedule_requests sr LEFT JOIN course_offerings co ON co.id = sr.offering_id LEFT JOIN subjects s ON s.id = co.subject_id JOIN time_slots ts ON ts.id = sr.slot_id WHERE sr.request_type IN ('ROOM', 'OTHER') AND (sr.room_id = ? OR sr.instructor_id = ? OR co.section_id = ?) AND sr.term_id = ? AND sr.day_of_week = ? AND sr.status IN ('PENDING', 'APPROVED') AND (sr.request_date = ? OR (sr.request_date IS NULL AND sr.note LIKE ?)) AND (CAST(? AS INTEGER) IS NULL OR sr.id <> ?)");
     $requests->execute([$roomId, $instructorId, $sectionId, $termId, $day, $date, '[REQUEST_DATE:' . $date . ']%', $excludeRequestId, $excludeRequestId]);
     foreach ($requests->fetchAll() as $request) {
         if ($request['start_time'] < $end && $request['end_time'] > $start) {
@@ -2394,7 +2400,16 @@ function room_request_conflicts(PDO $pdo, int $roomId, int $instructorId, int $s
 
 function check_room_availability(PDO $pdo, array $user, array $input): array
 {
-    $offeringId = input_int($input, 'offering_id', 1, 100000000);
+    $requestType = strtoupper((string) ($input['request_type'] ?? 'ROOM'));
+    if (!in_array($requestType, ['ROOM', 'OTHER'], true)) {
+        throw new ApiError(422, 'Invalid room request type.');
+    }
+    $isOther = $requestType === 'OTHER';
+    $purpose = trim((string) ($input['purpose'] ?? ''));
+    if ($isOther && ($purpose === '' || strlen($purpose) > 300)) {
+        throw new ApiError(422, 'Enter a purpose of no more than 300 characters for this room request.');
+    }
+    $offeringId = $isOther ? null : input_int($input, 'offering_id', 1, 100000000);
     $roomId = input_int($input, 'room_id', 1, 100000000);
     $slotId = input_int($input, 'slot_id', 1, 100000000);
     $times = parse_room_request_times($input);
@@ -2403,11 +2418,15 @@ function check_room_availability(PDO $pdo, array $user, array $input): array
     if (empty($user['instructor_id'])) {
         throw new ApiError(403, 'Your account is not linked to a faculty record.');
     }
-    $offering = $pdo->prepare("SELECT id, instructor_id, section_id FROM course_offerings WHERE id = ? AND term_id = ? AND instructor_id = ? AND status = 'ACTIVE'");
-    $offering->execute([$offeringId, $termId, (int) $user['instructor_id']]);
-    $offeringRecord = $offering->fetch();
-    if (!$offeringRecord) {
-        throw new ApiError(404, 'Class assignment not found.');
+    $sectionId = 0;
+    if (!$isOther) {
+        $offering = $pdo->prepare("SELECT id, instructor_id, section_id FROM course_offerings WHERE id = ? AND term_id = ? AND instructor_id = ? AND status = 'ACTIVE'");
+        $offering->execute([$offeringId, $termId, (int) $user['instructor_id']]);
+        $offeringRecord = $offering->fetch();
+        if (!$offeringRecord) {
+            throw new ApiError(404, 'Class assignment not found.');
+        }
+        $sectionId = (int) $offeringRecord['section_id'];
     }
     $room = $pdo->prepare('SELECT id FROM rooms WHERE id = ? AND active = 1');
     $room->execute([$roomId]);
@@ -2431,7 +2450,7 @@ function check_room_availability(PDO $pdo, array $user, array $input): array
         }
     }
 
-    $conflicts = room_request_conflicts($pdo, $roomId, (int) $offeringRecord['instructor_id'], (int) $offeringRecord['section_id'], $offeringId, $termId, $times['day'], $times['date'], $times['start'], $times['end']);
+    $conflicts = room_request_conflicts($pdo, $roomId, (int) $user['instructor_id'], $sectionId, $offeringId ?? 0, $termId, $times['day'], $times['date'], $times['start'], $times['end']);
     $run = active_run($pdo, $termId);
     $ignoreEntryId = null;
     if ($run !== null) {
@@ -2442,14 +2461,16 @@ function check_room_availability(PDO $pdo, array $user, array $input): array
             $ignoreEntryId = (int) $entryId;
         }
     }
-    try {
-        validate_manual_candidate($pdo, $termId, $offeringId, $roomId, $times['day'], $slotId, $ignoreEntryId, true, [$times['start'], $times['end']]);
-    } catch (ApiError $error) {
-        if ($error->status !== 409) {
-            throw $error;
-        }
-        if ($conflicts === []) {
-            $conflicts[] = ['start_time' => $times['start'], 'end_time' => $times['end'], 'resource' => 'Instructor or class section', 'description' => $error->getMessage()];
+    if (!$isOther) {
+        try {
+            validate_manual_candidate($pdo, $termId, $offeringId, $roomId, $times['day'], $slotId, $ignoreEntryId, true, [$times['start'], $times['end']]);
+        } catch (ApiError $error) {
+            if ($error->status !== 409) {
+                throw $error;
+            }
+            if ($conflicts === []) {
+                $conflicts[] = ['start_time' => $times['start'], 'end_time' => $times['end'], 'resource' => 'Instructor or class section', 'description' => $error->getMessage()];
+            }
         }
     }
     return ['available' => $conflicts === [], 'conflicts' => $conflicts, 'request_start_time' => $times['start'], 'requested_end_time' => $times['end']];
@@ -2490,7 +2511,16 @@ function available_rooms_for_request(PDO $pdo, array $user, array $input): array
 
 function create_room_request(PDO $pdo, array $user, array $input): array
 {
-    $offeringId = input_int($input, 'offering_id', 1, 100000000);
+    $requestType = strtoupper((string) ($input['request_type'] ?? 'ROOM'));
+    if (!in_array($requestType, ['ROOM', 'OTHER'], true)) {
+        throw new ApiError(422, 'Invalid room request type.');
+    }
+    $isOther = $requestType === 'OTHER';
+    $offeringId = $isOther ? null : input_int($input, 'offering_id', 1, 100000000);
+    $note = trim((string) ($isOther ? ($input['purpose'] ?? '') : ($input['note'] ?? '')));
+    if ($isOther && ($note === '' || strlen($note) > 300)) {
+        throw new ApiError(422, 'Enter a purpose of no more than 300 characters for this room request.');
+    }
     $roomId = input_int($input, 'room_id', 1, 100000000);
     $slotId = input_int($input, 'slot_id', 1, 100000000);
     if (empty($user['instructor_id'])) {
@@ -2504,14 +2534,90 @@ function create_room_request(PDO $pdo, array $user, array $input): array
         validate_room_request_submission($pdo, $input, $user);
 
         $termId = active_term_id($pdo);
-        $note = trim((string) ($input['note'] ?? ''));
-        $insert = $pdo->prepare('INSERT INTO schedule_requests(term_id, offering_id, instructor_id, room_id, request_date, day_of_week, slot_id, requested_end_time, note) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)');
-        $insert->execute([$termId, $offeringId, (int) $user['instructor_id'], $roomId, $times['date'], $times['day'], $slotId, $times['end'], $note]);
+        $insert = $pdo->prepare('INSERT INTO schedule_requests(term_id, offering_id, instructor_id, room_id, request_type, request_date, day_of_week, slot_id, requested_end_time, note) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $insert->execute([$termId, $offeringId, (int) $user['instructor_id'], $roomId, $requestType, $times['date'], $times['day'], $slotId, $times['end'], $note]);
         $requestId = db_insert_id($pdo, 'schedule_requests');
         audit($pdo, $user, 'REQUEST_SCHEDULE', 'schedule_request', $requestId);
         $pdo->exec('COMMIT');
     } catch (Throwable $error) {
         try { $pdo->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
+        throw $error;
+    }
+
+    return ['snapshot' => bootstrap($pdo, $user)];
+}
+
+function create_schedule_change_request(PDO $pdo, array $user, array $input): array
+{
+    if (empty($user['instructor_id'])) {
+        throw new ApiError(403, 'Your account is not linked to a faculty record.');
+    }
+
+    $entryId = input_int($input, 'entry_id', 1, 100000000);
+    $roomId = input_int($input, 'room_id', 1, 100000000);
+    $day = input_int($input, 'day_of_week', 1, 5);
+    [$startTime, $endTime] = parse_manual_schedule_times($input);
+    $pdo->beginTransaction();
+    try {
+        $termId = active_term_id($pdo);
+        $run = active_run($pdo, $termId);
+        if (!$run) {
+            throw new ApiError(409, 'There is no published schedule to change.');
+        }
+
+        $entryStmt = $pdo->prepare("SELECT se.id, se.offering_id, COALESCE(se.start_time_override, ts.start_time) AS current_start_time, COALESCE(se.end_time_override, (SELECT ts_end.end_time FROM time_slots ts_end WHERE ts_end.slot_order = ts.slot_order + s.duration_slots - 1), ts.end_time) AS current_end_time FROM schedule_entries se JOIN course_offerings co ON co.id = se.offering_id JOIN subjects s ON s.id = co.subject_id JOIN time_slots ts ON ts.id = se.slot_id WHERE se.id = ? AND se.run_id = ? AND se.status = 'PUBLISHED' AND co.term_id = ? AND co.instructor_id = ? FOR UPDATE OF se");
+        $entryStmt->execute([$entryId, (int) $run['id'], $termId, (int) $user['instructor_id']]);
+        $entry = $entryStmt->fetch();
+        if (!$entry) {
+            throw new ApiError(404, 'Scheduled class not found in your published timetable.');
+        }
+        $currentDuration = strtotime((string) $entry['current_end_time']) - strtotime((string) $entry['current_start_time']);
+        $requestedDuration = strtotime($endTime) - strtotime($startTime);
+        if ($requestedDuration !== $currentDuration) {
+            throw new ApiError(422, 'Keep the class duration unchanged when requesting a schedule change.');
+        }
+
+        $startSlotStmt = $pdo->prepare('SELECT id FROM time_slots WHERE start_time = ? LIMIT 1');
+        $startSlotStmt->execute([$startTime]);
+        $startSlotId = $startSlotStmt->fetchColumn();
+        if ($startSlotId === false) {
+            throw new ApiError(422, 'The proposed start time must match a configured timetable hour.');
+        }
+
+        $pendingStmt = $pdo->prepare("SELECT 1 FROM schedule_requests WHERE target_entry_id = ? AND request_type = 'CHANGE' AND status = 'PENDING' LIMIT 1");
+        $pendingStmt->execute([$entryId]);
+        if ($pendingStmt->fetchColumn()) {
+            throw new ApiError(409, 'A change request for this class is already awaiting review.');
+        }
+
+        $roomStmt = $pdo->prepare('SELECT id FROM rooms WHERE id = ? AND active = 1');
+        $roomStmt->execute([$roomId]);
+        if (!$roomStmt->fetchColumn()) {
+            throw new ApiError(404, 'Room not found.');
+        }
+
+        $validated = validate_manual_candidate(
+            $pdo,
+            $termId,
+            (int) $entry['offering_id'],
+            $roomId,
+            $day,
+            (int) $startSlotId,
+            $entryId,
+            true,
+            [$startTime, $endTime]
+        );
+        $slotId = (int) $validated['candidate']['slot_id'];
+        $note = trim(input_string($input, 'note', 300, false));
+        $insert = $pdo->prepare("INSERT INTO schedule_requests (term_id, offering_id, instructor_id, room_id, request_type, target_entry_id, day_of_week, slot_id, requested_end_time, note) VALUES (?, ?, ?, ?, 'CHANGE', ?, ?, ?, ?, ?)");
+        $insert->execute([$termId, (int) $entry['offering_id'], (int) $user['instructor_id'], $roomId, $entryId, $day, $slotId, $endTime, $note]);
+        $requestId = db_insert_id($pdo, 'schedule_requests');
+        audit($pdo, $user, 'REQUEST_SCHEDULE_CHANGE', 'schedule_request', $requestId, ['entry_id' => $entryId]);
+        $pdo->commit();
+    } catch (Throwable $error) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
         throw $error;
     }
 
@@ -2563,13 +2669,47 @@ function review_schedule_request(PDO $pdo, array $user, array $input): array
         if (!$request) {
             throw new ApiError(409, 'This request has already been reviewed.');
         }
+        if (($request['request_type'] ?? 'ROOM') === 'OTHER') {
+            $slotStmt = $pdo->prepare('SELECT start_time, end_time FROM time_slots WHERE id = ?');
+            $slotStmt->execute([(int) $request['slot_id']]);
+            $requestSlot = $slotStmt->fetch();
+            if (!$requestSlot) {
+                throw new ApiError(422, 'The requested start time is no longer available.');
+            }
+            $requestDate = (string) ($request['request_date'] ?? '');
+            if ($requestDate === '' || trim((string) $request['note']) === '') {
+                throw new ApiError(422, 'The request date and purpose are required.');
+            }
+            $roomStmt = $pdo->prepare('SELECT 1 FROM rooms WHERE id=? AND active=1');
+            $roomStmt->execute([(int) $request['room_id']]);
+            if (!$roomStmt->fetchColumn()) {
+                throw new ApiError(409, 'The requested room is no longer active.');
+            }
+            $requestedEnd = (string) ($request['requested_end_time'] ?: $requestSlot['end_time']);
+            $conflicts = room_request_conflicts($pdo, (int) $request['room_id'], (int) $request['instructor_id'], 0, 0, (int) $request['term_id'], (int) $request['day_of_week'], $requestDate, (string) $requestSlot['start_time'], $requestedEnd, $id);
+            if ($conflicts !== []) {
+                throw new ApiError(409, 'The room or instructor is occupied for part of this time.', ['conflicts' => $conflicts]);
+            }
+            $pdo->prepare("UPDATE schedule_requests SET status='APPROVED', reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int) $user['id'], $id]);
+            audit($pdo, $user, 'APPROVE_OTHER_ROOM_REQUEST', 'schedule_request', $id, ['purpose' => (string) $request['note']]);
+            $pdo->exec('COMMIT');
+            return ['snapshot' => bootstrap($pdo, $user)];
+        }
         $run = active_run($pdo, (int) $request['term_id']);
         if (!$run) {
             throw new ApiError(409, 'Generate a schedule before approving requests.');
         }
-        $existing = $pdo->prepare("SELECT se.id FROM schedule_entries se WHERE se.run_id=? AND se.offering_id=? AND se.status='PUBLISHED' ORDER BY se.id DESC LIMIT 1");
-        $existing->execute([(int) $run['id'], (int) $request['offering_id']]);
+        if (($request['request_type'] ?? 'ROOM') === 'CHANGE') {
+            $existing = $pdo->prepare("SELECT se.id FROM schedule_entries se WHERE se.id=? AND se.run_id=? AND se.offering_id=? AND se.status='PUBLISHED' LIMIT 1");
+            $existing->execute([(int) ($request['target_entry_id'] ?? 0), (int) $run['id'], (int) $request['offering_id']]);
+        } else {
+            $existing = $pdo->prepare("SELECT se.id FROM schedule_entries se WHERE se.run_id=? AND se.offering_id=? AND se.status='PUBLISHED' ORDER BY id LIMIT 1");
+            $existing->execute([(int) $run['id'], (int) $request['offering_id']]);
+        }
         $entryId = $existing->fetchColumn();
+        if (($request['request_type'] ?? 'ROOM') === 'CHANGE' && $entryId === false) {
+            throw new ApiError(409, 'The scheduled class changed before this request could be approved. Refresh the timetable and submit a new request.');
+        }
         $slotStmt = $pdo->prepare('SELECT start_time, end_time FROM time_slots WHERE id = ?');
         $slotStmt->execute([(int) $request['slot_id']]);
         $requestSlot = $slotStmt->fetch();
@@ -2595,7 +2735,7 @@ function review_schedule_request(PDO $pdo, array $user, array $input): array
         if ($entryId !== false) {
             $entryId = (int) $entryId;
             $pdo->prepare('DELETE FROM schedule_occupancy WHERE entry_id=?')->execute([$entryId]);
-            $pdo->prepare('UPDATE schedule_entries SET room_id=?, day_of_week=?, slot_id=?, end_time_override=? WHERE id=?')->execute([(int) $request['room_id'], (int) $request['day_of_week'], (int) $request['slot_id'], $requestedEnd, $entryId]);
+            $pdo->prepare('UPDATE schedule_entries SET room_id=?, day_of_week=?, slot_id=?, start_time_override=?, end_time_override=? WHERE id=?')->execute([(int) $request['room_id'], (int) $request['day_of_week'], (int) $request['slot_id'], $requestedTime[0], $requestedEnd, $entryId]);
         } else {
             $pdo->prepare("INSERT INTO schedule_entries(run_id,offering_id,meeting_no,room_id,day_of_week,slot_id,end_time_override,status) VALUES(?,?,?,?,?,?,?, 'PUBLISHED')")->execute([(int) $run['id'], (int) $request['offering_id'], 1, (int) $request['room_id'], (int) $request['day_of_week'], (int) $request['slot_id'], $requestedEnd]);
             $entryId = db_insert_id($pdo, 'schedule_entries');
@@ -2607,7 +2747,7 @@ function review_schedule_request(PDO $pdo, array $user, array $input): array
             }
         }
         $pdo->prepare("UPDATE schedule_requests SET status='APPROVED', reviewed_by=?, reviewed_at=CURRENT_TIMESTAMP WHERE id=?")->execute([(int) $user['id'], $id]);
-        audit($pdo, $user, 'APPROVE_SCHEDULE_REQUEST', 'schedule_request', $id, ['entry_id' => $entryId]);
+        audit($pdo, $user, ($request['request_type'] ?? 'ROOM') === 'CHANGE' ? 'APPROVE_SCHEDULE_CHANGE' : 'APPROVE_SCHEDULE_REQUEST', 'schedule_request', $id, ['entry_id' => $entryId]);
         $pdo->exec('COMMIT');
     } catch (Throwable $error) {
         try { $pdo->exec('ROLLBACK'); } catch (Throwable $rollbackError) {}
@@ -3239,10 +3379,10 @@ function handle(PDO $pdo): never
         if ($action === 'audit_export') {
             $result = audit_rows($pdo, $auditInput, true);
             audit($pdo, $admin, 'EXPORT_AUDIT_LOGS', 'audit_logs', null, ['rows' => count($result['rows'])]);
-            $lines = [implode(',', array_map('audit_csv_cell', ['Timestamp PHT', 'Actor', 'Role', 'Action', 'Target', 'Severity', 'Outcome', 'Source IP', 'Request path', 'Method', 'Correlation ID', 'Summary']))];
+            $lines = [implode(',', array_map('audit_csv_cell', ['Timestamp PHT', 'Actor', 'Username', 'Role', 'Action', 'Target', 'Severity', 'Outcome', 'Source IP', 'Request path', 'Method', 'Correlation ID', 'Summary']))];
             foreach ($result['rows'] as $row) {
                 $summary = (string) (($row['details']['summary'] ?? '') ?: $row['action']);
-                $lines[] = implode(',', array_map('audit_csv_cell', [$row['occurred_at_utc'], $row['username'] ?: 'System', $row['role'] ?: '', $row['action'], ($row['entity_type'] ?: '') . ($row['entity_id'] ? ':' . $row['entity_id'] : ''), $row['severity'], $row['outcome'], $row['source_ip'], $row['request_path'], $row['http_method'], $row['correlation_id'], $summary]));
+                $lines[] = implode(',', array_map('audit_csv_cell', [$row['occurred_at_utc'], $row['display_name'] ?: $row['username'] ?: 'System', $row['username'] ?: '', $row['role'] ?: '', $row['action'], ($row['entity_type'] ?: '') . ($row['entity_id'] ? ':' . $row['entity_id'] : ''), $row['severity'], $row['outcome'], $row['source_ip'], $row['request_path'], $row['http_method'], $row['correlation_id'], $summary]));
             }
             respond_csv(implode("\r\n", $lines) . "\r\n", 'easysched-audit-logs.csv');
         }
@@ -3250,7 +3390,7 @@ function handle(PDO $pdo): never
     }
 
     $user = require_auth($pdo);
-    if (in_array($action, ['generate','generate_selected','save_schedule','add_schedule','delete_schedule','save_master','import_offerings','change_password','save_settings','save_student_profile','review_registration','request_schedule','review_schedule_request','check_room_availability','available_rooms','request_email_change_otp','confirm_email_change'], true)) require_csrf($input);
+    if (in_array($action, ['generate','generate_selected','save_schedule','add_schedule','delete_schedule','save_master','import_offerings','change_password','save_settings','save_student_profile','review_registration','request_schedule','request_schedule_change','review_schedule_request','check_room_availability','available_rooms','request_email_change_otp','confirm_email_change'], true)) require_csrf($input);
     if ($action === 'import_offerings') {
         if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') throw new ApiError(405, 'POST is required.');
         $admin = require_auth($pdo, ['admin']);
@@ -3279,6 +3419,13 @@ function handle(PDO $pdo): never
     if ($action === 'request_schedule') {
         require_auth($pdo, ['instructor']);
         respond(['ok' => true, 'data' => create_room_request($pdo, $user, $input)]);
+    }
+    if ($action === 'request_schedule_change') {
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
+            throw new ApiError(405, 'POST is required.');
+        }
+        require_auth($pdo, ['instructor']);
+        respond(['ok' => true, 'data' => create_schedule_change_request($pdo, $user, $input)]);
     }
     if ($action === 'review_schedule_request') respond(['ok' => true, 'data' => review_schedule_request($pdo, $user, $input)]);
     if ($action === 'bootstrap') respond(['ok'=>true,'data'=>bootstrap($pdo,$user)]);

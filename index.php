@@ -387,7 +387,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                     <div class="metric-grid" id="metricGrid"></div>
                     <div class="dashboard-lower-grid">
                         <article class="panel dashboard-upcoming-panel">
-                            <div class="panel-heading"><div><p class="eyebrow">Next on the calendar</p><h3>Upcoming classes</h3><p class="dashboard-panel-note">Classes in the published timetable</p></div><button class="button button-ghost" data-navigate="schedules" type="button">Open schedule</button></div>
+                            <div class="panel-heading"><div><p class="eyebrow">Next on the calendar</p><h3>Upcoming classes</h3><p class="dashboard-panel-note">Remaining classes this week</p></div><button class="button button-ghost" data-navigate="schedules" type="button">Open schedule</button></div>
                             <div class="table-wrap">
                                 <table class="data-table compact">
                                     <thead><tr><th>Time</th><th>Subject</th><th>Section</th><th>Room</th><th>Instructor</th></tr></thead>
@@ -430,7 +430,7 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                         <p class="audit-status" id="auditStatus" role="status" aria-live="polite"></p>
                         <div class="table-wrap audit-table-wrap">
                             <table class="data-table audit-table">
-                                <thead><tr><th>Timestamp (PHT)</th><th>Actor</th><th>Action</th><th>Target</th><th>Severity</th><th>Outcome</th><th>Source IP</th><th></th></tr></thead>
+                                <thead><tr><th>Timestamp (PHT)</th><th>Actor</th><th>Username</th><th>Action</th><th>Target</th><th>Severity</th><th>Outcome</th><th>Source IP</th><th></th></tr></thead>
                                 <tbody id="auditBody"></tbody>
                             </table>
                         </div>
@@ -451,12 +451,27 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                         <div><p class="eyebrow"></p><h2 id="schedulesHeading">Weekly schedule</h2><p class="muted">Day view shows every class in its time slot. Week view groups classes that start at the same time.</p><span class="active-term-label" id="scheduleTermLabel"></span></div>
                         <div class="page-heading-actions">
                             <button class="button button-ghost" id="printButton" type="button"><?= easysched_icon('printer', '15') ?>Print</button>
+                            <button class="button button-ghost student-only" id="studentLinksButton" type="button" aria-haspopup="dialog" aria-controls="studentLinksDialog" hidden>Links</button>
                             <button class="button button-secondary" id="exportButton" type="button"><?= easysched_icon('download', '15') ?>Export CSV</button>
                             <button class="button button-secondary manage-only" id="addScheduleButton" type="button">Add class</button>
                             <button class="button button-secondary manage-only" id="manualGenerateButton" type="button"><?= easysched_icon('list', '15') ?>Manual generate</button>
                             <button class="button button-primary manage-only" id="generateButton" type="button"><?= easysched_icon('sparkle', '15') ?>Auto generate</button>
                         </div>
                     </div>
+                    <dialog class="audit-detail-dialog student-links-dialog" id="studentLinksDialog" aria-labelledby="studentLinksTitle">
+                        <div class="panel-heading">
+                            <div><p class="eyebrow">Student resources</p><h3 id="studentLinksTitle">Example Google Meet links</h3></div>
+                            <button class="icon-button" id="studentLinksClose" type="button" aria-label="Close links">&times;</button>
+                        </div>
+                        <p class="student-links-note" id="studentLinksTerm"></p>
+                        <p class="student-links-warning">These are fake example links for demonstration only. They do not connect to real classes or meetings.</p>
+                        <div class="table-wrap student-links-table-wrap">
+                            <table class="data-table">
+                                <thead><tr><th>#</th><th>Instructor</th><th>Subject</th><th>Example GMeet Link</th></tr></thead>
+                                <tbody id="studentLinksBody"></tbody>
+                            </table>
+                        </div>
+                    </dialog>
                     <div class="filter-bar">
                         <label class="field-inline">View<select id="scheduleViewFilter"><option value="all">All classes</option><option value="section">By section</option><option value="instructor">By instructor</option><option value="room">By room</option><option value="room_type">By room type</option></select></label>
                         <label class="field-inline" id="scheduleFilterValueWrap">Filter<select id="scheduleFilterValue"><option value="all">All</option></select></label>
@@ -486,24 +501,39 @@ const EASYSCHED_SCHOOL = 'New Sinai School and Colleges Sta. Rosa, Inc.';
                 </section>
 
                 <section class="page" id="page-room-requests" data-page="room-requests" aria-labelledby="roomRequestsHeading" hidden>
-                    <div class="page-heading"><div><p class="eyebrow"></p><h2 id="roomRequestsHeading">Room requests</h2><p class="muted">Request a room and time for an assigned class. An administrator must approve it before it is added to the timetable.</p></div></div>
+                    <div class="page-heading"><div><p class="eyebrow"></p><h2 id="roomRequestsHeading">Room requests</h2><p class="muted">Request a room for a specific class date, or propose a day, time, and room change for a published class. An administrator must approve each request.</p></div></div>
                     <article class="panel instructor-only" id="scheduleRequestPanel" hidden>
                         <div class="panel-heading"><div><p class="eyebrow">Instructor request</p><h3>Request a room and time</h3></div></div>
                         <form id="scheduleRequestForm" class="form-grid" method="post">
-                            <div class="field"><label for="requestOffering">Class assignment</label><select id="requestOffering" required></select></div>
-                            <div class="field"><label for="requestDate">Exact date</label><input id="requestDate" type="date" required></div>
+                            <div class="field"><label for="requestOffering">Class assignment</label><select id="requestOffering" aria-controls="requestOtherPurposeField" aria-expanded="false" required></select></div>
+                            <div class="field full" id="requestOtherPurposeField" hidden><label for="requestPurpose">Purpose <span class="muted">(required)</span></label><textarea id="requestPurpose" maxlength="300" rows="3" placeholder="Explain why you are requesting a room" required></textarea></div>
+                            <div class="field"><label for="requestDateButton">Exact date</label><div class="request-date-picker"><input id="requestDate" type="hidden"><button class="button button-secondary request-date-trigger" id="requestDateButton" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="requestDateCalendar">Choose a date</button><div class="request-date-calendar" id="requestDateCalendar" hidden><div class="request-date-calendar-heading"><label class="sr-only" for="requestCalendarMonth">Month</label><select id="requestCalendarMonth" aria-label="Choose month"></select><strong id="requestCalendarYear"></strong></div><div class="request-date-weekdays" aria-hidden="true"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div><div class="request-date-days" id="requestCalendarDays" role="group" aria-label="Available weekdays"></div></div></div><span class="field-hint">Choose a weekday at least one day ahead, within the current year.</span></div>
                             <div class="field"><label for="requestStartTime">Start time</label><div class="time-input-group"><input id="requestStartTime" value="08:00" inputmode="numeric" maxlength="5" pattern="[0-9]{2}:[0-9]{2}" placeholder="HH:MM" required><select id="requestStartPeriod" aria-label="Start time period"><option>AM</option><option>PM</option></select></div></div>
                             <div class="field"><label for="requestEndTime">End time</label><div class="time-input-group"><input id="requestEndTime" value="09:00" inputmode="numeric" maxlength="5" pattern="[0-9]{2}:[0-9]{2}" placeholder="HH:MM" required><select id="requestEndPeriod" aria-label="End time period"><option>AM</option><option>PM</option></select></div></div>
                             <div class="field"><label for="requestRoom">Available room</label><select id="requestRoom" required><option value="">Choose a date and time first</option></select></div>
                             <div class="field full"><p id="roomAvailabilityStatus" class="availability-status muted" role="status" aria-live="polite">Choose a date, start time, and end time to find available rooms.</p></div>
-                            <div class="field full"><label for="requestNote">Note <span class="muted">(optional)</span></label><input id="requestNote" maxlength="300" placeholder="Reason for this request"></div>
+                            <div class="field full" id="requestNoteField"><label for="requestNote">Note <span class="muted">(optional)</span></label><input id="requestNote" maxlength="300" placeholder="Additional details"></div>
                             <div class="field full"><button class="button button-primary" id="submitRoomRequestButton" type="submit" disabled>Submit room request</button></div>
                         </form>
                         <div class="table-wrap"><table class="data-table"><thead><tr><th>Class</th><th>Room</th><th>Date</th><th>Day</th><th>Time</th><th>Status</th></tr></thead><tbody id="instructorRequestBody"></tbody></table></div>
                     </article>
+                    <article class="panel instructor-only" id="scheduleChangePanel" hidden>
+                        <div class="panel-heading"><div><p class="eyebrow">Instructor request</p><h3>Request a schedule change</h3></div></div>
+                        <p class="muted">Propose a different weekday, time, or room for one of your published classes. An administrator must approve the change before your timetable is updated.</p>
+                        <form id="scheduleChangeForm" class="form-grid" method="post">
+                            <div class="field full"><label for="changeEntry">Published class</label><select id="changeEntry" required></select></div>
+                            <div class="field"><label for="changeDay">Proposed weekday</label><select id="changeDay" required><option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option></select></div>
+                            <div class="field"><label for="changeRoom">Proposed room</label><select id="changeRoom" required></select></div>
+                            <div class="field"><label for="changeStartTime">Proposed start time</label><div class="time-input-group"><input id="changeStartTime" value="08:00" inputmode="numeric" maxlength="5" pattern="[0-9]{2}:[0-9]{2}" placeholder="HH:MM" required><select id="changeStartPeriod" aria-label="Proposed start time period"><option>AM</option><option>PM</option></select></div></div>
+                            <div class="field"><label for="changeEndTime">Proposed end time</label><div class="time-input-group"><input id="changeEndTime" value="09:00" inputmode="numeric" maxlength="5" pattern="[0-9]{2}:[0-9]{2}" placeholder="HH:MM" required><select id="changeEndPeriod" aria-label="Proposed end time period"><option>AM</option><option>PM</option></select></div></div>
+                            <div class="field full"><label for="changeNote">Reason <span class="muted">(optional)</span></label><input id="changeNote" maxlength="300" placeholder="Reason for this schedule change"></div>
+                            <div class="field full"><button class="button button-primary" id="submitScheduleChangeButton" type="submit">Submit schedule change request</button></div>
+                        </form>
+                        <div class="table-wrap"><table class="data-table"><thead><tr><th>Class</th><th>Proposed room</th><th>Weekday</th><th>Time</th><th>Status</th></tr></thead><tbody id="instructorChangeRequestBody"></tbody></table></div>
+                    </article>
                     <article class="panel admin-only" id="scheduleRequestReviewPanel" hidden>
-                        <div class="panel-heading"><div><p class="eyebrow">Room requests</p><h3>Pending instructor requests</h3></div><span class="badge badge-warning" id="scheduleRequestCount">0 pending</span></div>
-                        <div class="table-wrap"><table class="data-table"><thead><tr><th>Instructor</th><th>Class</th><th>Room</th><th>Date</th><th>Day</th><th>Time</th><th>Note</th><th>Action</th></tr></thead><tbody id="scheduleRequestReviewBody"></tbody></table></div>
+                        <div class="panel-heading"><div><p class="eyebrow">Instructor requests</p><h3>Pending room and schedule requests</h3></div><span class="badge badge-warning" id="scheduleRequestCount">0 pending</span></div>
+                        <div class="table-wrap"><table class="data-table"><thead><tr><th>Request</th><th>Instructor</th><th>Class</th><th>Current schedule</th><th>Proposed room</th><th>Date / weekday</th><th>Time</th><th>Note</th><th>Action</th></tr></thead><tbody id="scheduleRequestReviewBody"></tbody></table></div>
                     </article>
                 </section>
 

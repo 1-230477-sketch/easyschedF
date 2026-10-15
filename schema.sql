@@ -183,9 +183,10 @@ CREATE TABLE IF NOT EXISTS schedule_occupancy (
 CREATE TABLE IF NOT EXISTS schedule_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     term_id INTEGER NOT NULL REFERENCES academic_terms(id) ON DELETE CASCADE,
-    offering_id INTEGER NOT NULL REFERENCES course_offerings(id) ON DELETE CASCADE,
+    offering_id INTEGER REFERENCES course_offerings(id) ON DELETE CASCADE,
     instructor_id INTEGER NOT NULL REFERENCES instructors(id) ON DELETE RESTRICT,
     room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE RESTRICT,
+    request_type TEXT NOT NULL DEFAULT 'ROOM' CHECK (request_type IN ('ROOM','CHANGE','OTHER')),
     request_date TEXT,
     day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 1 AND 7),
     slot_id INTEGER NOT NULL REFERENCES time_slots(id) ON DELETE RESTRICT,

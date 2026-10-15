@@ -89,8 +89,21 @@ function db(): PDO
 
 function ensure_schedule_request_date(PDO $pdo): void
 {
+    $pdo->exec("ALTER TABLE schedule_requests ADD COLUMN IF NOT EXISTS request_type TEXT NOT NULL DEFAULT 'ROOM'");
+    $pdo->exec('ALTER TABLE schedule_requests ADD COLUMN IF NOT EXISTS target_entry_id BIGINT');
     $pdo->exec('ALTER TABLE schedule_requests ADD COLUMN IF NOT EXISTS request_date TEXT');
     $pdo->exec('ALTER TABLE schedule_requests ADD COLUMN IF NOT EXISTS requested_end_time TEXT');
+    if ($pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'pgsql') {
+        $offeringRequired = $pdo->query("SELECT attnotnull FROM pg_attribute WHERE attrelid='schedule_requests'::regclass AND attname='offering_id' AND NOT attisdropped")->fetchColumn();
+        if ($offeringRequired) {
+            $pdo->exec('ALTER TABLE schedule_requests ALTER COLUMN offering_id DROP NOT NULL');
+        }
+        $requestTypeConstraint = $pdo->query("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='schedule_requests'::regclass AND conname='schedule_requests_request_type_check'")->fetchColumn();
+        if ($requestTypeConstraint === false || !str_contains((string) $requestTypeConstraint, "'OTHER'")) {
+            $pdo->exec('ALTER TABLE schedule_requests DROP CONSTRAINT IF EXISTS schedule_requests_request_type_check');
+            $pdo->exec("ALTER TABLE schedule_requests ADD CONSTRAINT schedule_requests_request_type_check CHECK (request_type IN ('ROOM', 'CHANGE', 'OTHER'))");
+        }
+    }
     $pdo->exec('ALTER TABLE schedule_entries ADD COLUMN IF NOT EXISTS start_time_override TEXT');
     $pdo->exec('ALTER TABLE schedule_entries ADD COLUMN IF NOT EXISTS end_time_override TEXT');
     $pdo->exec('ALTER TABLE schedule_entries ADD COLUMN IF NOT EXISTS room_fit_override INTEGER NOT NULL DEFAULT 0');

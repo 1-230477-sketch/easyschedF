@@ -456,6 +456,7 @@ kbd {
 
 .field input,
 .field select,
+.field textarea,
 .field-inline select,
 .search-field input {
   width: 100%;
@@ -468,7 +469,24 @@ kbd {
   font-size: 13.5px;
   transition: border-color var(--fast) ease, box-shadow var(--fast) ease, background var(--fast) ease;
 }
+.request-date-picker { position: relative; }
+.request-date-trigger { width: 100%; min-height: 42px; justify-content: flex-start; background: var(--surface); color: var(--text); font-size: 13.5px; font-weight: 400; }
+.request-date-calendar { position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; width: min(320px, calc(100vw - 40px)); padding: 14px; border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-lg); }
+.request-date-calendar-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.request-date-calendar-heading select { flex: 1; min-width: 0; min-height: 36px; padding: 6px 30px 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--r-sm); background-color: var(--surface); color: var(--text); font: inherit; }
+.request-date-calendar-heading strong { color: var(--text-secondary); font-size: 13px; }
+.request-date-weekdays,
+.request-date-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; text-align: center; }
+.request-date-weekdays { margin-bottom: 5px; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+.request-date-days { color: var(--text); }
+.request-date-day,
+.request-date-empty { display: grid; min-width: 0; min-height: 34px; place-items: center; }
+.request-date-day { padding: 0; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); cursor: pointer; font: inherit; font-size: 12.5px; }
+.request-date-day:not(:disabled):hover,
+.request-date-day.is-selected { background: var(--accent); color: var(--accent-ink); }
+.request-date-day:disabled { color: var(--text-muted); cursor: not-allowed; opacity: .38; }
 .field input::placeholder { color: var(--text-muted); }
+.field textarea { min-height: 84px; resize: vertical; }
 
 .field select,
 .field-inline select {
@@ -486,6 +504,7 @@ kbd {
 
 .field input:focus,
 .field select:focus,
+.field textarea:focus,
 .field-inline select:focus,
 .search-field input:focus {
   border-color: var(--accent);
@@ -1452,6 +1471,12 @@ kbd {
 .audit-detail-list dt, .audit-detail-list dd { margin: 0; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; overflow-wrap: anywhere; }
 .audit-detail-list dt { color: var(--text-muted); font-weight: 700; }
 .audit-detail-list dd { color: var(--text); }
+.student-links-dialog { width: min(820px, calc(100% - 32px)); }
+.student-links-note { margin: 0 0 var(--s-2); color: var(--text-secondary); font-size: 13px; font-weight: 650; }
+.student-links-warning { margin: 0 0 var(--s-4); color: var(--warning); font-size: 12px; line-height: 1.5; }
+.student-links-table-wrap { max-height: min(55vh, 480px); overflow: auto; }
+.student-links-table-wrap .data-table { min-width: 520px; }
+.student-example-link { color: var(--accent-ink); font-size: 12px; overflow-wrap: anywhere; }
 .app-shell.dashboard-active #page-dashboard .dashboard-upcoming-panel .data-table { table-layout: fixed; }
 .app-shell.dashboard-active #page-dashboard .dashboard-upcoming-panel .data-table th:nth-child(1),
 .app-shell.dashboard-active #page-dashboard .dashboard-upcoming-panel .data-table td:nth-child(1) { width: 20%; }
@@ -1572,7 +1597,7 @@ kbd {
 .dashboard-quick-action:nth-child(2) { background: #fff0e8; }
 .dashboard-quick-action:nth-child(3) { background: #edf7ed; }
 .dashboard-quick-action:nth-child(4) { background: #edf6ff; }
-.app-shell.dashboard-active .dashboard-quick-action { grid-template-columns: 28px minmax(0, 1fr); gap: 7px; padding: 7px; font-size: 10px; }
+.app-shell.dashboard-active .dashboard-quick-action { grid-template-columns: 28px minmax(0, 1fr); gap: 7px; padding: 7px; font-size: 12px; font-weight: 400; line-height: 1.35; }
 .app-shell.dashboard-active .dashboard-quick-icon { width: 28px; height: 28px; }
 .app-shell.dashboard-active .dashboard-quick-action > svg { display: none; }
 @media (min-width: 901px) and (min-height: 700px) {

@@ -117,8 +117,8 @@
     instructor: [
       ['Instructor orientation', 'Your workspace shows assigned classes, the published timetable, and a dedicated Room requests tab.', ['Use My schedule for confirmed meetings and Room requests for proposed changes.']],
       ['Read the weekly schedule', 'My schedule shows subjects, sections, rooms, exact dates, weekdays, and hourly time slots.', ['Lecture, laboratory, and other room types use different calendar colors.']],
-      ['Request a room', 'Room requests let you choose an assigned class, room, exact date, weekday, start time, end time, and optional note.', ['Use the 12-hour HH:MM format with the AM or PM selector.']],
-      ['Track approval', 'Your request history shows Pending, Approved, or Rejected. Approved requests are checked against room, instructor, section, and time conflicts.', ['Only approved and validated changes become part of the timetable.']],
+      ['Request a room or schedule change', 'The Room requests page lets you request a room for a specific date or propose a different weekday, time, or room for one of your published classes.', ['Schedule changes keep the current class duration and must use a configured start time.']],
+      ['Track approval', 'Your separate request histories show Pending, Approved, or Rejected. Administrators review both request types, and approved changes update the published timetable.', ['Every proposed schedule is checked against room, instructor, section, and time conflicts.']],
       ['Account settings', 'Use Settings to change your password and keep your account secure.', ['Never share your password or use another person’s account.']]
     ],
     student: [
@@ -145,6 +145,7 @@
   let modalRecord = null;
   let modalReturnFocus = null;
   let registrationOpen = false;
+  let requestCalendarMonth = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -211,12 +212,13 @@
   function renderAuditRows(rows) {
     const body = $('#auditBody');
     if (!rows.length) {
-      body.innerHTML = '<tr><td colspan="8" class="empty-state">No audit events match the selected filters.</td></tr>';
+      body.innerHTML = '<tr><td colspan="9" class="empty-state">No audit events match the selected filters.</td></tr>';
       return;
     }
     body.innerHTML = rows.map((row) => `<tr>
       <td>${esc(row.occurred_at_utc)}</td>
-      <td>${esc(row.username || 'System')}</td>
+      <td>${esc(row.display_name || row.username || 'System')}</td>
+      <td>${esc(row.username || '—')}</td>
       <td><strong>${esc(row.action)}</strong></td>
       <td>${esc(row.entity_type || '—')}${row.entity_id ? ` #${esc(row.entity_id)}` : ''}</td>
       <td><span class="audit-badge audit-${esc(String(row.severity).toLowerCase())}">${esc(row.severity)}</span></td>
@@ -240,7 +242,7 @@
       $('#auditStatus').textContent = `${result.total} event${result.total === 1 ? '' : 's'} found.`;
     } catch (error) {
       $('#auditStatus').textContent = error.message;
-      $('#auditBody').innerHTML = '<tr><td colspan="8" class="empty-state">Audit events could not be loaded.</td></tr>';
+      $('#auditBody').innerHTML = '<tr><td colspan="9" class="empty-state">Audit events could not be loaded.</td></tr>';
     }
   }
 
@@ -250,7 +252,7 @@
       const details = Object.entries(row.details || {}).map(([key, value]) => `<dt>${esc(key)}</dt><dd>${esc(typeof value === 'object' ? JSON.stringify(value) : value)}</dd>`).join('');
       $('#auditDetailTitle').textContent = row.action;
       $('#auditDetailContent').innerHTML = `<dl class="audit-detail-list">
-        <dt>Timestamp (PHT)</dt><dd>${esc(row.occurred_at_utc)}</dd><dt>Actor</dt><dd>${esc(row.username || 'System')} (${esc(row.role || 'Unavailable')})</dd>
+        <dt>Timestamp (PHT)</dt><dd>${esc(row.occurred_at_utc)}</dd><dt>Actor</dt><dd>${esc(row.display_name || row.username || 'System')} (${esc(row.role || 'Unavailable')})</dd><dt>Username</dt><dd>${esc(row.username || 'Unavailable')}</dd>
         <dt>Target</dt><dd>${esc(row.entity_type || 'Unavailable')}${row.entity_id ? ` #${esc(row.entity_id)}` : ''}</dd>
         <dt>Severity</dt><dd>${esc(row.severity)}</dd><dt>Outcome</dt><dd>${esc(row.outcome)}</dd><dt>Source IP</dt><dd>${esc(row.source_ip || 'Unavailable')}</dd>
         <dt>Request</dt><dd>${esc(row.http_method || '')} ${esc(row.request_path || 'Unavailable')}</dd><dt>Correlation ID</dt><dd>${esc(row.correlation_id || 'Unavailable')}</dd>${details}</dl>`;
@@ -571,15 +573,27 @@
     if (dashboardLowerGrid) dashboardLowerGrid.classList.toggle('dashboard-without-quick-actions', !canManage());
     const termElement = $('#activeTermLabel'); if (termElement) termElement.textContent = termLabel;
     const metricGrid = $('#metricGrid'); if (metricGrid) metricGrid.hidden = false;
-    const today = new Date().getDay(); const todayDay = today >= 1 && today <= 5 ? today : 1; const todayCount = list.filter((row) => Number(row.day_of_week) === todayDay).length;
+    const now = new Date();
+    const today = now.getDay();
+    const todayDay = today >= 1 && today <= 5 ? today : 1;
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+    const todayCount = list.filter((row) => Number(row.day_of_week) === todayDay).length;
+    const remainingClasses = list.filter((row) => {
+      const day = Number(row.day_of_week);
+      if (day < todayDay) return false;
+      if (day > todayDay || today < 1 || today > 5) return true;
+      const startMinutes = scheduleClockMinutes(row.start_time);
+      return startMinutes !== null && startMinutes > currentMinutes;
+    });
+    const nextClass = remainingClasses[0];
     const metrics = canSeeGeneration()
       ? [metric('Active class assignments', snapshot.offerings.length, 'Course-section assignments'), metric('Published classes', list.length, run ? `Run #${run.id}` : 'No published run'), metric('Sections', snapshot.sections.length, 'Current academic term'), metric('Rooms', snapshot.rooms.length, 'Available resources')]
-      : [metric('My classes', list.length, role() === 'student' ? 'Classes in your section' : 'Classes assigned to you'), metric("Today's classes", todayCount, 'Scheduled for today'), metric('Rooms', new Set(list.map((row) => row.room_id)).size, 'Rooms in your schedule'), metric('Next class', list[0]?.time_label || 'None', list[0] ? `${list[0].subject_code} · ${list[0].room_code}` : 'No upcoming class')];
+      : [metric('My classes', list.length, role() === 'student' ? 'Classes in your section' : 'Classes assigned to you'), metric("Today's classes", todayCount, 'Scheduled for today'), metric('Rooms', new Set(list.map((row) => row.room_id)).size, 'Rooms in your schedule'), metric('Next class', nextClass?.time_label || 'None', nextClass ? `${nextClass.subject_code} · ${nextClass.room_code}` : 'No upcoming class')];
     $('#metricGrid').innerHTML = metrics.join('');
     const query = state.query.trim().toLowerCase();
-    const upcoming = list.filter((row) => !query || `${row.subject_code} ${row.subject_name} ${row.section_code} ${row.program_code} ${row.room_code} ${row.instructor_name}`.toLowerCase().includes(query)).slice(0, 6);
-    const emptyTitle = query ? 'No matching classes' : 'No published schedule';
-    const emptyMessage = query ? 'Try another subject, section, room, or instructor.' : 'Generate a conflict-free timetable to populate this list.';
+    const upcoming = remainingClasses.filter((row) => !query || `${row.subject_code} ${row.subject_name} ${row.section_code} ${row.program_code} ${row.room_code} ${row.instructor_name}`.toLowerCase().includes(query)).slice(0, 6);
+    const emptyTitle = query ? 'No matching classes' : list.length ? 'No upcoming classes' : 'No published schedule';
+    const emptyMessage = query ? 'Try another subject, section, room, or instructor.' : list.length ? 'There are no remaining classes for the rest of this week.' : 'Generate a conflict-free timetable to populate this list.';
     $('#upcomingBody').innerHTML = upcoming.length ? upcoming.map((row) => `<tr><td><strong>${esc(row.day_name)}</strong><span class="subline">${esc(row.time_label || row.slot_label)}</span></td><td><strong>${esc(row.subject_code)}</strong><span class="subline">${esc(row.subject_name)}</span></td><td>${esc(row.section_code)}</td><td>${esc(row.room_code)}</td><td>${esc(row.instructor_name)}</td></tr>`).join('') : `<tr><td colspan="5">${emptyState(emptyTitle, emptyMessage)}</td></tr>`;
     const quickActions = canManage()
       ? [
@@ -688,6 +702,32 @@
     });
   }
 
+  function openStudentLinks() {
+    if (role() !== 'student') return;
+    const term = (state.snapshot.terms || []).find((item) => Number(item.id) === Number(state.snapshot.active_term_id));
+    $('#studentLinksTerm').textContent = term
+      ? `AY ${term.academic_year} · ${term.semester}`
+      : 'No active academic term';
+    const instructorSubjects = new Map();
+    schedules().forEach((row) => {
+      const name = String(row.instructor_name || '').trim();
+      if (!name) return;
+      const key = name.toLocaleLowerCase();
+      if (!instructorSubjects.has(key)) instructorSubjects.set(key, { name, subjects: new Map() });
+      const subject = [row.subject_code, row.subject_name].map((value) => String(value || '').trim()).filter(Boolean).join(' · ');
+      if (subject) instructorSubjects.get(key).subjects.set(subject.toLocaleLowerCase(), subject);
+    });
+    const instructors = [...instructorSubjects.values()].sort((a, b) => a.name.localeCompare(b.name));
+    $('#studentLinksBody').innerHTML = instructors.length
+      ? instructors.map(({ name, subjects }, index) => {
+        const exampleLink = `meet.google.com/demo-class-${String(index + 1).padStart(3, '0')}`;
+        const subjectList = [...subjects.values()].sort((a, b) => a.localeCompare(b));
+        return `<tr><td>${index + 1}</td><td>${esc(name)}</td><td>${subjectList.length ? subjectList.map(esc).join('<br>') : '—'}</td><td><code class="student-example-link">${exampleLink}</code></td></tr>`;
+      }).join('')
+      : '<tr><td colspan="4">No instructors are listed in your published schedule.</td></tr>';
+    $('#studentLinksDialog').showModal();
+  }
+
   function renderSchedules() {
     const activeTerm = (state.snapshot.terms || []).find((term) => Number(term.id) === Number(state.snapshot.active_term_id));
     const termLabel = activeTerm ? `${activeTerm.academic_year} · ${activeTerm.semester}` : 'No active academic term';
@@ -716,19 +756,59 @@
   function renderScheduleRequests() {
     const requests = (state.snapshot.schedule_requests || []).map((item) => ({ ...item, slot_label: requestTimeLabel(item) }));
     const instructorPanel = $('#scheduleRequestPanel');
+    const changePanel = $('#scheduleChangePanel');
     const reviewPanel = $('#scheduleRequestReviewPanel');
     if (instructorPanel) instructorPanel.hidden = role() !== 'instructor';
+    if (changePanel) changePanel.hidden = role() !== 'instructor';
     if (reviewPanel) reviewPanel.hidden = !canAdmin();
     if (role() === 'instructor') {
       const offerings = state.snapshot.offerings || [];
-      $('#requestOffering').innerHTML = offerings.map((item) => `<option value="${Number(item.id)}">${esc(item.subject_name)} - ${esc(item.section_code)}</option>`).join('') || '<option value="">No assigned classes</option>';
+      $('#requestOffering').innerHTML = `${offerings.map((item) => `<option value="${Number(item.id)}">${esc(item.subject_name)} - ${esc(item.section_code)}</option>`).join('')}<option value="other">Others</option>`;
+      updateRoomRequestType();
+      configureRequestDateBounds();
       renderRequestRooms();
-      $('#instructorRequestBody').innerHTML = requests.length ? requests.map((item) => `<tr><td>${esc(item.subject_name)} - ${esc(item.section_code)}</td><td>${esc(item.room_code)}</td><td>${esc(requestDateLabel(item))}</td><td>${esc(['','Monday','Tuesday','Wednesday','Thursday','Friday'][Number(item.day_of_week)] || item.day_of_week)}</td><td>${esc(item.slot_label)}</td><td>${esc(item.status)}</td></tr>`).join('') : `<tr><td colspan="6">${emptyState('No room requests', 'Your submitted requests will appear here.')}</td></tr>`;
+      const roomRequests = requests.filter((item) => ['ROOM', 'OTHER'].includes(item.request_type || 'ROOM'));
+      const changeRequests = requests.filter((item) => item.request_type === 'CHANGE');
+      $('#instructorRequestBody').innerHTML = roomRequests.length ? roomRequests.map((item) => `<tr><td>${item.request_type === 'OTHER' ? 'Others' : `${esc(item.subject_name)} - ${esc(item.section_code)}`}${item.request_type === 'OTHER' ? `<span class="subline">${esc(item.note)}</span>` : ''}</td><td>${esc(item.room_code)}</td><td>${esc(requestDateLabel(item))}</td><td>${esc(['','Monday','Tuesday','Wednesday','Thursday','Friday'][Number(item.day_of_week)] || item.day_of_week)}</td><td>${esc(item.slot_label)}</td><td>${esc(item.status)}</td></tr>`).join('') : `<tr><td colspan="6">${emptyState('No room requests', 'Your submitted room requests will appear here.')}</td></tr>`;
+      $('#instructorChangeRequestBody').innerHTML = changeRequests.length ? changeRequests.map((item) => `<tr><td>${esc(item.subject_name)} - ${esc(item.section_code)}</td><td>${esc(item.room_code)}</td><td>${esc(['','Monday','Tuesday','Wednesday','Thursday','Friday'][Number(item.day_of_week)] || item.day_of_week)}</td><td>${esc(item.slot_label)}</td><td>${esc(item.status)}</td></tr>`).join('') : `<tr><td colspan="5">${emptyState('No schedule change requests', 'Your submitted change requests will appear here.')}</td></tr>`;
+      const scheduledClasses = schedules();
+      $('#changeEntry').innerHTML = scheduledClasses.map((row) => `<option value="${Number(row.id)}">${esc(row.subject_code)} - ${esc(row.section_code)} · ${esc(row.day_name)} · ${esc(row.time_label)} · ${esc(row.room_code)}</option>`).join('') || '<option value="">No published classes to change</option>';
+      $('#changeRoom').innerHTML = (state.snapshot.rooms || []).map((room) => `<option value="${Number(room.id)}">${esc(room.code)} - ${esc(room.name)}</option>`).join('') || '<option value="">No rooms available</option>';
+      $('#submitScheduleChangeButton').disabled = scheduledClasses.length === 0 || !(state.snapshot.rooms || []).length;
+      setChangeFormFromSelectedEntry();
     }
     if (canAdmin()) {
       $('#scheduleRequestCount').textContent = `${requests.length} pending`;
-      $('#scheduleRequestReviewBody').innerHTML = requests.length ? requests.map((item) => `<tr><td>${esc(item.instructor_name)}</td><td>${esc(item.subject_name)} - ${esc(item.section_code)}</td><td>${esc(item.room_code)}</td><td>${esc(requestDateLabel(item))}</td><td>${esc(['','Monday','Tuesday','Wednesday','Thursday','Friday'][Number(item.day_of_week)] || item.day_of_week)}</td><td>${esc(item.slot_label)}</td><td>${esc((item.note || '').replace(/^\[REQUEST_DATE:\d{4}-\d{2}-\d{2}\]\s*/, '') || '-')}</td><td><div class="row-actions"><button class="button button-primary button-small review-schedule-request" data-request-id="${Number(item.id)}" data-decision="APPROVE" type="button">Approve</button><button class="button button-danger button-small review-schedule-request" data-request-id="${Number(item.id)}" data-decision="REJECT" type="button">Reject</button></div></td></tr>`).join('') : `<tr><td colspan="8">${emptyState('No pending room requests', 'Instructor requests will appear here.')}</td></tr>`;
+      $('#scheduleRequestReviewBody').innerHTML = requests.length ? requests.map((item) => {
+        const isChange = item.request_type === 'CHANGE';
+        const isOther = item.request_type === 'OTHER';
+        const weekday = ['','Monday','Tuesday','Wednesday','Thursday','Friday'][Number(item.day_of_week)] || item.day_of_week;
+        const current = isChange
+          ? `${['','Monday','Tuesday','Wednesday','Thursday','Friday'][Number(item.previous_day_of_week)] || 'Unavailable'} · ${requestTimeLabel({ request_start_time: item.previous_start_time, requested_end_time: item.previous_end_time })} · ${item.previous_room_code || 'Unavailable'}`
+          : '—';
+        const dateOrDay = isChange ? weekday : requestDateLabel(item);
+        const note = (item.note || '').replace(/^\[REQUEST_DATE:\d{4}-\d{2}-\d{2}\]\s*/, '') || '—';
+        return `<tr><td>${isChange ? 'Schedule change' : isOther ? 'Other room request' : 'Room request'}</td><td>${esc(item.instructor_name)}</td><td>${isOther ? 'Others' : `${esc(item.subject_name)} - ${esc(item.section_code)}`}</td><td>${esc(current)}</td><td>${esc(item.room_code)}</td><td>${esc(dateOrDay)}</td><td>${esc(item.slot_label)}</td><td>${esc(note)}</td><td><div class="row-actions"><button class="button button-primary button-small review-schedule-request" data-request-id="${Number(item.id)}" data-decision="APPROVE" type="button">Approve</button><button class="button button-danger button-small review-schedule-request" data-request-id="${Number(item.id)}" data-decision="REJECT" type="button">Reject</button></div></td></tr>`;
+      }).join('') : `<tr><td colspan="9">${emptyState('No pending instructor requests', 'Room and schedule change requests will appear here.')}</td></tr>`;
     }
+  }
+
+  function setChangeFormFromSelectedEntry() {
+    const selectedId = Number($('#changeEntry').value);
+    const row = schedules().find((item) => Number(item.id) === selectedId);
+    if (!row) return;
+    $('#changeDay').value = String(row.day_of_week);
+    $('#changeRoom').value = String(row.room_id);
+    const setClock = (value, timeId, periodId) => {
+      const match = /^(\d{1,2}):(\d{2})/.exec(String(value || ''));
+      if (!match) return;
+      const hour = Number(match[1]);
+      const period = hour >= 12 ? 'PM' : 'AM';
+      document.querySelector(timeId).value = `${String(hour % 12 || 12).padStart(2, '0')}:${match[2]}`;
+      document.querySelector(periodId).value = period;
+    };
+    setClock(row.start_time, '#changeStartTime', '#changeStartPeriod');
+    setClock(row.end_time, '#changeEndTime', '#changeEndPeriod');
   }
 
   function renderRequestRooms() {
@@ -737,6 +817,65 @@
       roomSelect.innerHTML = '<option value="">Choose a date and time first</option>';
       roomSelect.dataset.initialized = 'true';
     }
+  }
+
+  function updateRoomRequestType() {
+    const isOther = $('#requestOffering').value === 'other';
+    $('#requestOtherPurposeField').hidden = !isOther;
+    $('#requestPurpose').required = isOther;
+    $('#requestOffering').setAttribute('aria-expanded', String(isOther));
+    $('#requestNoteField').hidden = isOther;
+    if (isOther) $('#requestNote').value = '';
+    if (!isOther) $('#requestPurpose').value = '';
+  }
+
+  function renderRequestCalendar() {
+    configureRequestDateBounds();
+    const input = $('#requestDate');
+    const monthSelect = $('#requestCalendarMonth');
+    const daysGrid = $('#requestCalendarDays');
+    if (!input || !monthSelect || !daysGrid) return;
+    const today = new Date();
+    const year = today.getFullYear();
+    const firstMonth = today.getMonth();
+    if (!Number.isInteger(requestCalendarMonth) || requestCalendarMonth < firstMonth || requestCalendarMonth > 11) {
+      requestCalendarMonth = firstMonth;
+    }
+    monthSelect.innerHTML = Array.from({ length: 12 - firstMonth }, (_, offset) => {
+      const month = firstMonth + offset;
+      return `<option value="${month}"${month === requestCalendarMonth ? ' selected' : ''}>${esc(new Date(year, month, 1).toLocaleString(undefined, { month: 'long' }))}</option>`;
+    }).join('');
+    $('#requestCalendarYear').textContent = String(year);
+
+    const firstWeekday = (new Date(year, requestCalendarMonth, 1).getDay() + 6) % 7;
+    const daysInMonth = new Date(year, requestCalendarMonth + 1, 0).getDate();
+    const minDate = input.min;
+    const maxDate = input.max;
+    const cells = Array.from({ length: firstWeekday }, () => '<span class="request-date-empty" aria-hidden="true"></span>');
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, requestCalendarMonth, day);
+      const value = localDateInputValue(date);
+      const weekday = date.getDay();
+      const available = value >= minDate && value <= maxDate && weekday >= 1 && weekday <= 5;
+      const selected = value === input.value;
+      cells.push(`<button type="button" class="request-date-day${selected ? ' is-selected' : ''}" data-request-date="${value}"${available ? '' : ' disabled'}${selected ? ' aria-pressed="true"' : ''}>${day}</button>`);
+    }
+    daysGrid.innerHTML = cells.join('');
+  }
+
+  function closeRequestCalendar() {
+    $('#requestDateCalendar').hidden = true;
+    $('#requestDateButton').setAttribute('aria-expanded', 'false');
+  }
+
+  function chooseRequestDate(value) {
+    const input = $('#requestDate');
+    input.value = value;
+    const selected = new Date(`${value}T00:00:00`);
+    $('#requestDateButton').textContent = selected.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+    updateRequestDate();
+    closeRequestCalendar();
+    invalidateRoomAvailability();
   }
 
   function formatTimeInput(input) { const digits = input.value.replace(/\D/g, '').slice(0, 4); input.value = digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : digits; }
@@ -751,17 +890,45 @@
     return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
   }
 
-  function updateRequestDate() { const date = $('#requestDate').value; if (!date) return; const day = new Date(`${date}T00:00:00`).getDay(); if (day === 0 || day === 6) { showToast('Invalid date', 'Choose a Monday through Friday date.', 'error'); $('#requestDate').value = ''; } }
+  function localDateInputValue(date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
+  function configureRequestDateBounds() { const input = $('#requestDate'); if (!input) return; const today = new Date(); const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1); input.min = localDateInputValue(tomorrow); input.max = `${today.getFullYear()}-12-31`; }
+  function updateRequestDate() { configureRequestDateBounds(); const input = $('#requestDate'); const date = input.value; if (!date) return; if (date < input.min || date > input.max) { showToast('Invalid date', 'Choose a date at least one day ahead within the current year.', 'error'); input.value = ''; $('#requestDateButton').textContent = 'Choose a date'; return; } const day = new Date(`${date}T00:00:00`).getDay(); if (day === 0 || day === 6) { showToast('Invalid date', 'Choose a Monday through Friday date.', 'error'); input.value = ''; $('#requestDateButton').textContent = 'Choose a date'; } }
   function requestDateLabel(item) { return item.request_date || (String(item.note || '').match(/^\[REQUEST_DATE:(\d{4}-\d{2}-\d{2})\]/)?.[1] || '-'); }
   function requestTimeLabel(item) { const format = (value) => { const [hours, minutes] = String(value || '').slice(0, 5).split(':').map(Number); if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return ''; const period = hours >= 12 ? 'PM' : 'AM'; return `${hours % 12 || 12}:${String(minutes).padStart(2, '0')} ${period}`; }; const start = format(item.request_start_time); const end = format(item.requested_end_time); return start && end ? `${start} - ${end}` : item.slot_label || '-'; }
-  function roomRequestPayload() { const date = $('#requestDate').value; const start = $('#requestStartTime').value; const end = $('#requestEndTime').value; if (!$('#requestOffering').value || !date || !validTimeInput(start) || !validTimeInput(end)) throw new Error('Choose a class, exact date, and valid start and end times.'); const start24 = to24Hour(start, $('#requestStartPeriod').value); const day = new Date(`${date}T00:00:00`).getDay(); const slotId = Number((slots().find((slot) => slot.start_time === start24) || {}).id || 0); if (day < 1 || day > 5) throw new Error('Choose a Monday through Friday date.'); if (!slotId) throw new Error('Start time must match a configured timetable hour.'); return { offering_id: Number($('#requestOffering').value), room_id: Number($('#requestRoom').value || 0), request_date: date, day_of_week: day, slot_id: slotId, start_time: start, start_period: $('#requestStartPeriod').value, end_time: end, end_period: $('#requestEndPeriod').value }; }
+  function roomRequestPayload() { const date = $('#requestDate').value; const start = $('#requestStartTime').value; const end = $('#requestEndTime').value; const isOther = $('#requestOffering').value === 'other'; if (!$('#requestOffering').value || !date || !validTimeInput(start) || !validTimeInput(end)) throw new Error('Choose a class, exact date, and valid start and end times.'); if (isOther && !$('#requestPurpose').value.trim()) throw new Error('Enter the purpose for this room request.'); const start24 = to24Hour(start, $('#requestStartPeriod').value); const day = new Date(`${date}T00:00:00`).getDay(); const slotId = Number((slots().find((slot) => slot.start_time === start24) || {}).id || 0); if (day < 1 || day > 5) throw new Error('Choose a Monday through Friday date.'); if (!slotId) throw new Error('Start time must match a configured timetable hour.'); return { request_type: isOther ? 'OTHER' : 'ROOM', offering_id: isOther ? null : Number($('#requestOffering').value), purpose: isOther ? $('#requestPurpose').value.trim() : '', room_id: Number($('#requestRoom').value || 0), request_date: date, day_of_week: day, slot_id: slotId, start_time: start, start_period: $('#requestStartPeriod').value, end_time: end, end_period: $('#requestEndPeriod').value }; }
   function setRoomAvailabilityStatus(message, tone = 'muted') { const status = $('#roomAvailabilityStatus'); if (!status) return; status.textContent = message; status.className = `availability-status ${tone}`; $('#submitRoomRequestButton').disabled = tone !== 'health-ok' || !$('#requestRoom').value; }
   function invalidateRoomAvailability() { roomAvailabilityCheckId++; window.clearTimeout(roomAvailabilityTimer); availableRoomsReady = false; roomRequestAllowed = false; $('#requestRoom').innerHTML = '<option value="">Finding available rooms...</option>'; $('#submitRoomRequestButton').disabled = true; try { roomRequestPayload(); roomAvailabilityTimer = window.setTimeout(refreshAvailableRooms, 250); setRoomAvailabilityStatus('Finding available rooms...'); } catch (error) { $('#requestRoom').innerHTML = '<option value="">Choose a date and time first</option>'; setRoomAvailabilityStatus(error.message); } }
   async function refreshAvailableRooms() { const checkId = ++roomAvailabilityCheckId; try { const result = await request('available_rooms', { method: 'POST', body: roomRequestPayload() }); if (checkId !== roomAvailabilityCheckId) return; const rooms = result.rooms || []; const blockers = result.request_blockers || []; const select = $('#requestRoom'); const selectedRoom = select.value; select.innerHTML = rooms.length ? rooms.map((room) => `<option value="${Number(room.id)}">${esc(room.code)} - ${esc(room.name)} (${esc(room.room_type)})</option>`).join('') : '<option value="">No rooms available</option>'; if (rooms.some((room) => Number(room.id) === Number(selectedRoom))) select.value = selectedRoom; availableRoomsReady = rooms.length > 0; roomRequestAllowed = availableRoomsReady && blockers.length === 0; const conflictText = blockers.map((item) => `${item.description} (${requestTimeLabel({ request_start_time: item.start_time, requested_end_time: item.end_time })})`).join('; '); const message = blockers.length ? `${rooms.length ? `${rooms.length} room${rooms.length === 1 ? '' : 's'} are free, but this request cannot be submitted` : 'No rooms available for the selected time'}. ${conflictText}` : rooms.length ? `${rooms.length} room${rooms.length === 1 ? '' : 's'} available for the selected time.` : 'No rooms available for the selected time.'; setRoomAvailabilityStatus(message, roomRequestAllowed ? 'health-ok' : 'health-warn'); } catch (error) { if (checkId === roomAvailabilityCheckId) { availableRoomsReady = false; roomRequestAllowed = false; $('#requestRoom').innerHTML = '<option value="">Availability could not be loaded</option>'; setRoomAvailabilityStatus(error.message, 'health-error'); } } }
   function renderRoomRequests() { renderScheduleRequests(); }
 
   async function requestSchedule(event) { event.preventDefault(); let payload; try { payload = roomRequestPayload(); } catch (error) { setRoomAvailabilityStatus(error.message, 'health-error'); return; } if (!availableRoomsReady || !payload.room_id) { setRoomAvailabilityStatus('Choose an available room before submitting.', 'health-error'); return; } if (!roomRequestAllowed) { setRoomAvailabilityStatus('Resolve the instructor or class schedule conflict before submitting.', 'health-error'); return; } try { const result = await request('request_schedule', { method: 'POST', body: { ...payload, note: $('#requestNote').value } }); applySnapshot(result.snapshot); showToast('Request submitted', 'Your room request is waiting for administrator approval.'); invalidateRoomAvailability(); } catch (error) { const conflict = error.details?.conflicts?.[0]; const message = conflict ? `Conflict: this room is occupied from ${requestTimeLabel({ request_start_time: conflict.start_time, requested_end_time: conflict.end_time })} (${conflict.description}).` : error.message; availableRoomsReady = false; roomRequestAllowed = false; setRoomAvailabilityStatus(message, 'health-error'); showToast('Could not submit request', message, 'error'); } }
-  async function reviewScheduleRequest(id, decision) { if (!window.confirm(`${decision === 'APPROVE' ? 'Approve' : 'Reject'} this room request?`)) return; try { const result = await request('review_schedule_request', { method: 'POST', body: { request_id: id, decision } }); applySnapshot(result.snapshot); showToast('Request reviewed', decision === 'APPROVE' ? 'The room request was approved.' : 'The room request was rejected.'); } catch (error) { showToast('Could not review request', error.message, 'error'); } }
+  async function requestScheduleChange(event) {
+    event.preventDefault();
+    if (!$('#changeEntry').value || !$('#changeRoom').value || !validTimeInput($('#changeStartTime').value) || !validTimeInput($('#changeEndTime').value)) {
+      showToast('Check the request', 'Choose a published class, room, weekday, and valid start and end times.', 'error');
+      return;
+    }
+    try {
+      const result = await request('request_schedule_change', {
+        method: 'POST',
+        body: {
+          entry_id: Number($('#changeEntry').value),
+          room_id: Number($('#changeRoom').value),
+          day_of_week: Number($('#changeDay').value),
+          start_time: $('#changeStartTime').value,
+          start_period: $('#changeStartPeriod').value,
+          end_time: $('#changeEndTime').value,
+          end_period: $('#changeEndPeriod').value,
+          note: $('#changeNote').value
+        }
+      });
+      applySnapshot(result.snapshot);
+      showToast('Request submitted', 'Your schedule change is waiting for administrator approval.');
+    } catch (error) {
+      showToast('Could not submit schedule change', error.message, 'error');
+    }
+  }
+  async function reviewScheduleRequest(id, decision) { const item = (state.snapshot.schedule_requests || []).find((requestItem) => Number(requestItem.id) === Number(id)); const isChange = item?.request_type === 'CHANGE'; const isOther = item?.request_type === 'OTHER'; const requestLabel = isChange ? 'schedule change request' : isOther ? 'other room request' : 'room request'; if (!window.confirm(`${decision === 'APPROVE' ? 'Approve' : 'Reject'} this ${requestLabel}?`)) return; try { const result = await request('review_schedule_request', { method: 'POST', body: { request_id: id, decision } }); applySnapshot(result.snapshot); showToast('Request reviewed', decision === 'APPROVE' ? (isChange ? 'The schedule change was approved and the published class was updated.' : isOther ? 'The room reservation was approved.' : 'The room request was approved.') : `The ${requestLabel} was rejected.`); } catch (error) { showToast('Could not review request', error.message, 'error'); } }
 
   /* Printed timetables are handed out during review, so the sheet carries its
    * own term, filter and print date rather than relying on browser headers. */
@@ -1282,7 +1449,7 @@
     const terms = state.snapshot.terms; const active = terms.find((term) => Number(term.id) === Number(state.snapshot.active_term_id)) || terms[0]; if (active) { $('#academicYear').value = active.academic_year; $('#semester').value = active.semester; } $('#settingsForm').closest('.panel').hidden = !canAdmin(); $('#accountEmailValue').textContent = state.snapshot.user.email || 'Not provided';
   }
 
-  function renderAll() { buildNavigation(); $$('.manage-only').forEach((element) => { element.hidden = !canManage(); }); $$('.admin-only').forEach((element) => { element.hidden = !canAdmin(); }); navigate(state.page); }
+  function renderAll() { buildNavigation(); $$('.manage-only').forEach((element) => { element.hidden = !canManage(); }); $$('.admin-only').forEach((element) => { element.hidden = !canAdmin(); }); $$('.student-only').forEach((element) => { element.hidden = role() !== 'student'; }); navigate(state.page); }
 
   const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -1601,14 +1768,18 @@
       const ids = new Set(offerings.map((offering) => Number(offering[key])));
       return source.filter((row) => ids.has(Number(row.id))).map((row) => ({ id: Number(row.id), label: labelFor(row) }));
     };
+    const offeredInstructorIds = new Set(offerings.map((offering) => Number(offering.instructor_id)));
     const offeredProgramIds = new Set(offerings.map((offering) => Number(sectionById.get(Number(offering.section_id))?.program_id)).filter(Boolean));
     const groups = [
       { key: 'program', name: 'program_ids', label: 'Programs', options: (snapshot.programs || []).filter((row) => offeredProgramIds.has(Number(row.id))).map((row) => ({ id: Number(row.id), label: `${row.code} · ${row.name}` })) },
       { key: 'section', name: 'section_ids', label: 'Sections', options: uniqueOptions('section_id', snapshot.sections || [], (row) => `${row.code} · ${row.program_code || sectionById.get(Number(row.id))?.program_code || 'Program'}`) },
       { key: 'subject', name: 'subject_ids', label: 'Subjects', options: uniqueOptions('subject_id', snapshot.subjects || [], (row) => `${row.code} · ${row.name}`) },
-      { key: 'instructor', name: 'instructor_ids', label: 'Instructors', options: uniqueOptions('instructor_id', snapshot.instructors || [], (row) => row.name) }
+      { key: 'instructor', name: 'instructor_ids', label: 'Instructors', options: (snapshot.instructors || []).map((row) => {
+        const hasOfferings = offeredInstructorIds.has(Number(row.id));
+        return { id: Number(row.id), label: hasOfferings ? row.name : `${row.name} · No active class assignments`, disabled: !hasOfferings };
+      }) }
     ];
-    const groupMarkup = groups.map((group) => `<fieldset class="manual-generation-group" data-generation-group="${group.key}"><legend class="manual-generation-legend">${esc(group.label)}</legend><div class="manual-generation-group-actions"><button class="button button-ghost" type="button" data-generation-filter-action="all">All</button><button class="button button-ghost" type="button" data-generation-filter-action="clear">Clear</button></div><div class="manual-generation-options">${group.options.length ? group.options.map((option) => `<label class="manual-generation-option"><input type="checkbox" name="${group.name}" value="${option.id}"><span>${esc(option.label)}</span></label>`).join('') : '<span class="manual-generation-empty">No active options</span>'}</div></fieldset>`).join('');
+    const groupMarkup = groups.map((group) => `<fieldset class="manual-generation-group" data-generation-group="${group.key}"><legend class="manual-generation-legend">${esc(group.label)}</legend><div class="manual-generation-group-actions"><button class="button button-ghost" type="button" data-generation-filter-action="all">All</button><button class="button button-ghost" type="button" data-generation-filter-action="clear">Clear</button></div><div class="manual-generation-options">${group.options.length ? group.options.map((option) => `<label class="manual-generation-option"><input type="checkbox" name="${group.name}" value="${option.id}"${option.disabled ? ' disabled' : ''}><span>${esc(option.label)}</span></label>`).join('') : '<span class="manual-generation-empty">No active options</span>'}</div></fieldset>`).join('');
     return [`<p class="manual-generation-note">Choose at least one filter. When multiple filter groups are used, an offering must match every selected group. Matching offerings are regenerated; all other published classes are preserved.</p><div class="manual-generation-grid">${groupMarkup}</div><p class="manual-generation-preview" data-generation-preview aria-live="polite"></p>`];
   }
 
@@ -1848,6 +2019,7 @@
     $('#themeToggle').addEventListener('click', toggleTheme);
     $('#refreshLoginCaptcha').addEventListener('click', refreshLoginCaptcha);
     $('#loginForm').addEventListener('submit', login); $('#registrationForm').addEventListener('submit', registerStudent); $('#showRegistrationButton').addEventListener('click', showRegistration); $('#forgotPasswordButton').addEventListener('click', showForgotPassword); $('#backToLoginButton').addEventListener('click', () => showLogin('', true, true)); $('#backFromResetButton').addEventListener('click', () => showLogin('', true, true)); $('#sendRegistrationOtpButton').addEventListener('click', sendRegistrationOtp); $('#sendResetOtpButton').addEventListener('click', sendResetOtp); $('#forgotPasswordForm').addEventListener('submit', resetPassword); $('#logoutButton').addEventListener('click', logout); $('#menuButton').addEventListener('click', toggleSidebar); $('#sidebarBackdrop').addEventListener('click', closeSidebar);     $('#modalCloseButton').addEventListener('click', closeModal); $('#modalCancelButton').addEventListener('click', closeModal); $('#modalForm').addEventListener('submit', (event) => modalMode === 'edit-schedule' ? submitScheduleEditor(event) : modalMode === 'add-schedule' ? submitAddSchedule(event) : submitModal(event)); $('#generateButton').addEventListener('click', generate); $('#manualGenerateButton').addEventListener('click', openManualGenerationModal); $('#addScheduleButton').addEventListener('click', openAddScheduleModal); $('#dashboardGenerateButton').addEventListener('click', generate); $('#exportButton').addEventListener('click', exportSchedule); $('#reportExportButton').addEventListener('click', exportReport); $('#printButton').addEventListener('click', () => window.print()); $('#settingsForm').addEventListener('submit', saveSettings); $('#passwordForm').addEventListener('submit', changePassword); $('#requestEmailOtpButton').addEventListener('click', sendEmailChangeOtp); $('#emailChangeForm').addEventListener('submit', confirmEmailChange);
+    $('#studentLinksButton').addEventListener('click', openStudentLinks); $('#studentLinksClose').addEventListener('click', () => $('#studentLinksDialog').close()); $('#studentLinksDialog').addEventListener('click', (event) => { if (event.target === $('#studentLinksDialog')) $('#studentLinksDialog').close(); });
     $('#globalSearch').addEventListener('input', (event) => { state.query = event.target.value; if (state.page === 'dashboard') renderDashboard(); if (state.page === 'schedules') renderSchedules(); if (state.page === 'data') renderData(); }); $('#scheduleViewFilter').addEventListener('change', (event) => { state.scheduleView = event.target.value; state.scheduleFilter = 'all'; renderSchedules(); }); $('#scheduleFilterValue').addEventListener('change', (event) => { state.scheduleFilter = event.target.value; renderSchedules(); }); $('#addRecordButton').addEventListener('click', () => openDataRecord(state.dataTab));
     $('#calendarWeekView').addEventListener('click', () => { state.calendarView = 'week'; renderSchedules(); });
     $('#calendarDayView').addEventListener('click', () => { state.calendarView = 'day'; renderSchedules(); });
@@ -1869,7 +2041,7 @@
       if (!action) return;
       const group = action.closest('[data-generation-group]');
       if (!group) return;
-      group.querySelectorAll('.manual-generation-options input').forEach((input) => { input.checked = action.dataset.generationFilterAction === 'all'; });
+      group.querySelectorAll('.manual-generation-options input').forEach((input) => { input.checked = action.dataset.generationFilterAction === 'all' && !input.disabled; });
       updateManualGenerationPreview();
     });
     $('#subjectSearch').addEventListener('input', (event) => { state.subjectQuery = event.target.value; if (state.page === 'data' && state.dataTab === 'subjects') renderData(); });
@@ -1886,10 +2058,38 @@
       helpIndex = step;
       renderHelp();
     });
-    $('#requestOffering').addEventListener('change', invalidateRoomAvailability); $('#requestDate').addEventListener('change', updateRequestDate);
-    ['#requestOffering', '#requestDate', '#requestStartTime', '#requestStartPeriod', '#requestEndTime', '#requestEndPeriod'].forEach((selector) => { const field = $(selector); field.addEventListener('input', invalidateRoomAvailability); field.addEventListener('change', invalidateRoomAvailability); });
+    $('#requestOffering').addEventListener('change', () => { updateRoomRequestType(); invalidateRoomAvailability(); }); $('#requestPurpose').addEventListener('input', invalidateRoomAvailability);
+    $('#requestDateButton').addEventListener('click', () => {
+      const calendar = $('#requestDateCalendar');
+      if (!calendar.hidden) return closeRequestCalendar();
+      configureRequestDateBounds();
+      const selectedDate = $('#requestDate').value;
+      const selectedMonth = selectedDate ? new Date(`${selectedDate}T00:00:00`).getMonth() : new Date().getMonth();
+      requestCalendarMonth = selectedMonth;
+      renderRequestCalendar();
+      calendar.hidden = false;
+      $('#requestDateButton').setAttribute('aria-expanded', 'true');
+    });
+    $('#requestCalendarMonth').addEventListener('change', (event) => { requestCalendarMonth = Number(event.target.value); renderRequestCalendar(); });
+    $('#requestCalendarDays').addEventListener('click', (event) => {
+      const day = event.target.closest('[data-request-date]');
+      if (day && !day.disabled) chooseRequestDate(day.dataset.requestDate);
+    });
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest('.request-date-picker')) closeRequestCalendar();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !$('#requestDateCalendar').hidden) {
+        closeRequestCalendar();
+        $('#requestDateButton').focus();
+      }
+    });
+    ['#requestOffering', '#requestStartTime', '#requestStartPeriod', '#requestEndTime', '#requestEndPeriod'].forEach((selector) => { const field = $(selector); field.addEventListener('input', invalidateRoomAvailability); field.addEventListener('change', invalidateRoomAvailability); });
     $('#requestRoom').addEventListener('change', () => { $('#submitRoomRequestButton').disabled = !availableRoomsReady || !roomRequestAllowed || !$('#requestRoom').value; });
     $('#scheduleRequestForm').addEventListener('submit', requestSchedule); ['#requestStartTime', '#requestEndTime'].forEach((selector) => $(selector).addEventListener('input', (event) => formatTimeInput(event.target)));             document.addEventListener('click', (event) => { const dashboardManualGenerate = event.target.closest('[data-dashboard-manual-generate]'); if (dashboardManualGenerate) { openManualGenerationModal(); return; } const dashboardGenerate = event.target.closest('[data-dashboard-generate]'); if (dashboardGenerate) { generate(); return; } const dashboardAdd = event.target.closest('[data-dashboard-add]'); if (dashboardAdd) { navigate('schedules'); openAddScheduleModal(); return; } const navigateButton = event.target.closest('[data-navigate]'); if (navigateButton) { if (!navigateButton.dataset.navigate) return; if (navigateButton.dataset.dashboardTab) state.dataTab = navigateButton.dataset.dashboardTab; navigate(navigateButton.dataset.navigate); } const dataTab = event.target.closest('[data-data-tab]'); if (dataTab) { state.dataTab = dataTab.dataset.dataTab; $$('.tab-button').forEach((button) => { const active = button.dataset.dataTab === state.dataTab; button.classList.toggle('active', active); button.setAttribute('aria-selected', String(active)); }); renderData(); } const review = event.target.closest('.review-registration'); if (review) reviewRegistration(Number(review.dataset.registrationId), review.dataset.decision); const scheduleReview = event.target.closest('.review-schedule-request'); if (scheduleReview) reviewScheduleRequest(Number(scheduleReview.dataset.requestId), scheduleReview.dataset.decision); const edit = event.target.closest('.edit-record'); if (edit) openDataRecord(edit.dataset.entity, Number(edit.dataset.recordId)); const del = event.target.closest('.delete-record'); if (del) deleteRecord(del.dataset.entity, Number(del.dataset.recordId)); const editEntry = event.target.closest('.edit-entry'); if (editEntry) openScheduleEditor(Number(editEntry.dataset.entryId)); const cancelEntry = event.target.closest('.cancel-entry'); if (cancelEntry) cancelScheduleEntry(Number(cancelEntry.dataset.entryId)); });
+    $('#scheduleChangeForm').addEventListener('submit', requestScheduleChange);
+    $('#changeEntry').addEventListener('change', setChangeFormFromSelectedEntry);
+    ['#changeStartTime', '#changeEndTime'].forEach((selector) => $(selector).addEventListener('input', (event) => formatTimeInput(event.target)));
     document.addEventListener('input', (event) => {
       if (event.target.matches('#modal-start_time, #modal-end_time')) formatTimeInput(event.target);
     });
@@ -1933,6 +2133,10 @@
 
   async function start() {
     bindEvents();
+    window.setInterval(() => {
+      configureRequestDateBounds();
+      if (state.snapshot && state.page === 'dashboard') renderDashboard();
+    }, 30000);
     const initialRoute = readRoute();
     if ((NAV.admin || []).some(([id]) => id === initialRoute)) state.page = initialRoute;
     if (initialRoute === 'login') showLogin('', false);
